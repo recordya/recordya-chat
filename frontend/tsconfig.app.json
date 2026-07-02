@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2021", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitAny": false,
+    "noFallthroughCasesInSwitch": false,
+
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@plugins/*": ["../plugins/*"],
+      "react": ["./node_modules/@types/react"],
+      "react/*": ["./node_modules/@types/react/*"],
+      "react-dom": ["./node_modules/@types/react-dom"],
+      "react-dom/*": ["./node_modules/@types/react-dom/*"],
+      "lucide-react": ["./node_modules/lucide-react"],
+      "@radix-ui/react-tooltip": ["./node_modules/@radix-ui/react-tooltip"],
+      "react-markdown": ["./node_modules/react-markdown"],
+      "remark-breaks": ["./node_modules/remark-breaks"],
+      "remark-gfm": ["./node_modules/remark-gfm"],
+      "@tanstack/react-query": ["./node_modules/@tanstack/react-query"],
+      "sonner": ["./node_modules/sonner"],
+      "vitest": ["./node_modules/vitest"]
+    }
+  },
+  "include": ["src", "../plugins"]
+}

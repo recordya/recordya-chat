@@ -1,0 +1,8 @@
+{
+  "generic": "Coś poszło nie tak. Spróbuj ponownie.",
+  "accessRestricted": "Dostęp ograniczony.",
+  "unexpected": "Wystąpił nieoczekiwany błąd.",
+  "title": "Błąd",
+  "processing": "Wystąpił błąd podczas przetwarzania.",
+  "noResponseBody": "Brak treści odpowiedzi"
+}

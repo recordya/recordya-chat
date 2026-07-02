@@ -1,0 +1,8 @@
+{
+  "generic": "Something went wrong. Please try again.",
+  "accessRestricted": "Access restricted.",
+  "unexpected": "An unexpected error occurred.",
+  "title": "Error",
+  "processing": "An error occurred during processing.",
+  "noResponseBody": "No response body"
+}

@@ -1,0 +1,63 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Bun is not used — npm is the package manager (package-lock.json)
+bun.lockb
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.eggs/
+*.egg
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Plugin secrets (contain credentials)
+# Note: plugins/ lives outside core (sibling directory) when used as a submodule.
+# The parent project's .gitignore should include: plugins/*/backend/.env
+plugins/*/backend/.env
+
+# Prompt optimization experiments
+prompt-optimization/
+
+# Docker
+*.pid
+*.seed
+*.pid.lock
+
+# Database backups
+backups/
+*.sql

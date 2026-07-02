@@ -1,0 +1,11 @@
+{
+  "showArgs": "Show arguments",
+  "hideArgs": "Hide arguments",
+  "showResult": "Show result",
+  "hideResult": "Hide result",
+  "rows_one": "{{count}} row",
+  "rows_other": "{{count}} rows",
+  "thinking": "Thinking... ({{completed}}/{{total}})",
+  "thought_one": "Thought in {{count}} step",
+  "thought_other": "Thought in {{count}} steps"
+}

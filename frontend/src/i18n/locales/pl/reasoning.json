@@ -1,0 +1,15 @@
+{
+  "showArgs": "Pokaż argumenty",
+  "hideArgs": "Ukryj argumenty",
+  "showResult": "Pokaż wynik",
+  "hideResult": "Ukryj wynik",
+  "rows_one": "{{count}} wiersz",
+  "rows_few": "{{count}} wiersze",
+  "rows_many": "{{count}} wierszy",
+  "rows_other": "{{count}} wierszy",
+  "thinking": "Myślę... ({{completed}}/{{total}})",
+  "thought_one": "Pomyślałem w {{count}} kroku",
+  "thought_few": "Pomyślałem w {{count}} krokach",
+  "thought_many": "Pomyślałem w {{count}} krokach",
+  "thought_other": "Pomyślałem w {{count}} krokach"
+}

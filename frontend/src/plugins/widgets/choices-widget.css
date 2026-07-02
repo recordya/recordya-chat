@@ -1,0 +1,139 @@
+.core-choices-card {
+  border: 1px solid #d5d9e0;
+  border-radius: 16px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.core-choices-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: end;
+  column-gap: 12px;
+}
+
+.core-choices-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.core-choice-question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.core-choice-prompt {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.35;
+  font-weight: 700;
+  color: #111827;
+}
+
+.core-choice-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.core-choice-chip,
+.core-choice-open-toggle {
+  border-radius: 9999px;
+  border: 1px solid #ccd1d9;
+  background: #e6e8ee;
+  color: #1f2937;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 400;
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.core-choice-chip.is-selected,
+.core-choice-open-toggle.is-selected {
+  background: #111827;
+  border-color: #111827;
+  color: #f9fafb;
+}
+
+.core-choice-open-toggle {
+  width: 36px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-style: dashed;
+  border-color: #ccd1d9;
+  background: #ffffff;
+}
+
+.core-choice-open-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.core-choice-input {
+  width: 100%;
+  border: 1px solid #cfd5de;
+  border-radius: 12px;
+  background: #eef0f4;
+  color: #111827;
+  font-size: 12px;
+  line-height: 1.3;
+  padding: 8px 10px;
+}
+
+.core-choice-input:focus {
+  outline: none;
+  border-color: #6b7280;
+}
+
+.core-choices-submit-col {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  align-self: end;
+  min-height: 100%;
+}
+
+.core-choices-submit {
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  border: none;
+  background: hsl(var(--foreground));
+  color: hsl(var(--background));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.core-choices-submit:hover {
+  opacity: 0.8;
+}
+
+.core-choices-submit:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.core-choices-submit-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.core-choices-submitted {
+  margin: 0;
+  white-space: pre-wrap;
+  font: inherit;
+  color: #111827;
+  font-size: 14px;
+  line-height: 1.45;
+}

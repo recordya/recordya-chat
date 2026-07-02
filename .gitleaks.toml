@@ -1,0 +1,16 @@
+# Gitleaks configuration for the `core` repository.
+# Extends the default gitleaks ruleset and adds a narrowly-scoped allowlist
+# for a non-credential Keycloak JDBC connection string that the default
+# `generic-api-key` rule flags as a false positive (it matches the
+# "5432/keycloak" port/database fragment, not an actual secret — the
+# password is provided separately via the KEYCLOAK_DB_PASSWORD env var).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Local docker-compose Keycloak DSN (host:port/db, no credentials)"
+regexTarget = "line"
+regexes = [
+  '''jdbc:postgresql://keycloak-db:5432/keycloak''',
+]
