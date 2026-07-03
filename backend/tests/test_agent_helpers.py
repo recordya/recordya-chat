@@ -3,8 +3,10 @@ import json
 import pytest
 
 from src.core.config import settings
+from src.core.global_tools import GlobalToolRegistry
 from src.core.protocols import ContextConfig
 from src.services.agent_helpers import (
+    CompositeToolProvider,
     ConversationBuilder,
     ToolExecutionService,
     _safe_json_dumps,
@@ -905,3 +907,158 @@ class TestSafeJsonDumps:
         parsed = json.loads(result)
         assert parsed["result"][0]["score"] is None
         assert parsed["result"][1]["score"] == 0.95
+
+
+
+# ---------------------------------------------------------------------------
+# CompositeToolProvider tests
+# ---------------------------------------------------------------------------
+
+
+def _tool_def(name: str) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": name,
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+class GlobalProviderStub:
+    """Minimal plugin exporting one of its regular tools globally."""
+
+    def __init__(self, tool_name: str = "shared_render") -> None:
+        self.tool_name = tool_name
+        self.calls: list[tuple[str, dict]] = []
+
+    def get_tools_definition(self) -> list[dict]:
+        return [_tool_def(self.tool_name)]
+
+    async def execute_tool(self, tool_name: str, arguments: dict) -> dict:
+        self.calls.append((tool_name, arguments))
+        return {"success": True, "result": [], "row_count": 0, "handled_by": "global"}
+
+
+class ToolPlugin(DummyPlugin):
+    """DummyPlugin with local tool definitions and an optional manifest."""
+
+    def __init__(
+        self,
+        *,
+        manifest: dict | None = None,
+        tools: list[dict] | None = None,
+    ) -> None:
+        super().__init__()
+        self._manifest = manifest or {}
+        self._tools = tools if tools is not None else [_tool_def("local_tool")]
+
+    def get_manifest(self) -> dict:
+        return self._manifest
+
+    def get_tools_definition(self) -> list[dict]:
+        return self._tools
+
+
+def _registry_with(provider: GlobalProviderStub) -> GlobalToolRegistry:
+    registry = GlobalToolRegistry()
+    registry.register_plugin("provider_plugin", provider, [provider.tool_name])
+    return registry
+
+
+def test_composite_without_requires_exposes_only_plugin_tools():
+    """Global tools are opt-in — no requires_global_tools, no global tools."""
+    plugin = ToolPlugin()
+    registry = _registry_with(GlobalProviderStub())
+    composite = CompositeToolProvider(plugin, registry)
+
+    tools = composite.get_tools_definition()
+
+    assert [t["function"]["name"] for t in tools] == ["local_tool"]
+
+
+def test_composite_merges_opted_in_global_tools():
+    """Tools listed in requires_global_tools are appended after plugin tools."""
+    plugin = ToolPlugin(manifest={"requires_global_tools": ["shared_render"]})
+    registry = _registry_with(GlobalProviderStub("shared_render"))
+    composite = CompositeToolProvider(plugin, registry)
+
+    tools = composite.get_tools_definition()
+
+    assert [t["function"]["name"] for t in tools] == ["local_tool", "shared_render"]
+
+
+def test_composite_plugin_tools_take_priority_on_name_collision():
+    """A plugin-local tool shadows a global tool with the same name."""
+    plugin = ToolPlugin(
+        manifest={"requires_global_tools": ["shared_render"]},
+        tools=[_tool_def("shared_render")],
+    )
+    registry = _registry_with(GlobalProviderStub("shared_render"))
+    composite = CompositeToolProvider(plugin, registry)
+
+    tools = composite.get_tools_definition()
+
+    assert [t["function"]["name"] for t in tools] == ["shared_render"]
+
+
+@pytest.mark.asyncio
+async def test_composite_routes_global_call_to_registry():
+    """Opted-in global tool calls go to the registry, not the plugin."""
+    plugin = ToolPlugin(manifest={"requires_global_tools": ["shared_render"]})
+    provider = GlobalProviderStub("shared_render")
+    composite = CompositeToolProvider(plugin, _registry_with(provider))
+
+    result = await composite.execute_tool("shared_render", {"a": 1})
+
+    assert result["handled_by"] == "global"
+    assert provider.calls == [("shared_render", {"a": 1})]
+    assert plugin.execute_tool_calls == []
+
+
+@pytest.mark.asyncio
+async def test_composite_routes_local_call_to_plugin():
+    """Plugin-local tool calls never reach the registry."""
+    plugin = ToolPlugin(manifest={"requires_global_tools": ["shared_render"]})
+    provider = GlobalProviderStub("shared_render")
+    composite = CompositeToolProvider(plugin, _registry_with(provider))
+
+    await composite.execute_tool("local_tool", {"b": 2})
+
+    assert plugin.execute_tool_calls == [("local_tool", {"b": 2})]
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_composite_unknown_required_tool_falls_back_to_plugin():
+    """A required name absent from the registry is routed to the plugin."""
+    plugin = ToolPlugin(manifest={"requires_global_tools": ["not_registered"]})
+    composite = CompositeToolProvider(plugin, GlobalToolRegistry())
+
+    await composite.execute_tool("not_registered", {})
+
+    assert plugin.execute_tool_calls == [("not_registered", {})]
+
+
+def test_composite_prepare_arguments_pass_through_for_global_tools():
+    """Plugin argument hooks apply only to its own tools."""
+    class PreparingToolPlugin(ToolPlugin):
+        def prepare_tool_arguments(
+            self,
+            tool_name: str,
+            arguments: dict,
+            question: str | None = None,
+            conversation_history: list[dict] | None = None,
+        ) -> dict:
+            return {**arguments, "prepared": True}
+
+    plugin = PreparingToolPlugin(manifest={"requires_global_tools": ["shared_render"]})
+    registry = _registry_with(GlobalProviderStub("shared_render"))
+    composite = CompositeToolProvider(plugin, registry)
+
+    local_args = composite.prepare_tool_arguments("local_tool", {"x": 1})
+    global_args = composite.prepare_tool_arguments("shared_render", {"x": 1})
+
+    assert local_args == {"x": 1, "prepared": True}
+    assert global_args == {"x": 1}

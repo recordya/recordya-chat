@@ -89,6 +89,13 @@ class BasePlugin(ABC):
     display_name: str
     description: str
 
+    # Raw manifest.yaml contents; populated by PluginDiscovery after load.
+    _manifest: dict[str, Any] | None = None
+
+    def get_manifest(self) -> dict[str, Any]:
+        """Return the plugin's manifest contents (empty dict when absent)."""
+        return self._manifest or {}
+
     async def initialize(self, config: dict[str, Any]) -> None:
         """Initialize plugin with configuration."""
 
@@ -256,6 +263,55 @@ DataSourcePlugin = ManagedPlugin
 
 
 # =============================================================================
+# Tool surface — shared contract for OpenAI-style tool exposure
+# =============================================================================
+
+
+@runtime_checkable
+class ToolSurface(Protocol):
+    """Minimal tool surface: OpenAI-compatible definitions plus execution.
+
+    Satisfied structurally by ``ManagedPlugin`` and by adapters such as the
+    global tool registry. Used wherever only definitions and execution are
+    needed (e.g. registering a plugin's tools as global).
+    """
+
+    def get_tools_definition(self) -> list[dict[str, Any]]:
+        """Return OpenAI-compatible tool definitions."""
+        ...
+
+    async def execute_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Execute a tool and return a ManagedPlugin-style result."""
+        ...
+
+
+class ToolProvider(ToolSurface, Protocol):
+    """Tool surface consumed by the agent loop (adds argument preparation)."""
+
+    def prepare_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        question: str | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Normalize or enrich tool arguments before execution."""
+        ...
+
+
+def tool_definition_name(definition: dict[str, Any]) -> str:
+    """Extract the function name from an OpenAI-compatible tool definition."""
+    return str((definition.get("function") or {}).get("name") or "")
+
+
+def tool_error_result(error: str) -> dict[str, Any]:
+    """Build a standard ManagedPlugin-style error result."""
+    return {"success": False, "error": error, "result": [], "row_count": 0}
+
+
+# =============================================================================
 # ViewPlugin — custom UI view (not a chat agent)
 # =============================================================================
 
@@ -313,6 +369,10 @@ class ChatAccessGuard(Protocol):
     Plugins register implementations via ``access_guards.register_instance()``.
     Core iterates over all registered guards before processing a chat request
     without knowing any plugin-specific details.
+
+    Scope: UI entry only. Guards check whether the user may open a chat with
+    the active plugin. They do not authorize global tool calls. If an exported
+    tool needs per-user checks, implement them inside that tool.
     """
 
     async def check_access(

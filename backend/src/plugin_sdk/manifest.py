@@ -1,8 +1,10 @@
 """Plugin manifest schema for plugin.json/manifest.yaml validation.
 
 This module provides Pydantic models for validating plugin metadata.
-The manifest is informational - it describes the plugin but doesn't
-enforce capabilities at runtime.
+Plugin metadata is informational, but the manifest must conform to this
+schema — discovery rejects an invalid manifest.yaml and aborts startup
+(a missing manifest is fine). Declared capabilities are not enforced at
+runtime.
 
 Usage:
     from src.plugin_sdk import PluginManifest
@@ -67,8 +69,10 @@ class FrontendConfig(BaseModel):
 class PluginManifest(BaseModel):
     """Plugin manifest schema.
 
-    Defines metadata for a plugin. This is informational - it describes
-    the plugin but doesn't enforce capabilities at runtime.
+    Defines metadata for a plugin. The metadata is informational, but the
+    manifest itself must validate against this schema — discovery rejects
+    an invalid manifest.yaml and aborts startup. Declared capabilities are
+    not enforced at runtime.
 
     Example manifest.yaml (agent plugin):
         id: "my_plugin"
@@ -125,6 +129,23 @@ class PluginManifest(BaseModel):
     capabilities: list[str] = Field(
         default_factory=list,
         description="Declared capabilities (e.g., 'database', 'llm', 'http')"
+    )
+
+    # Global tool contribution / consumption (validated at startup)
+    provides_global_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tool names this plugin exports to the global tool registry. "
+            "Authoritative: each name must exist in the plugin's regular "
+            "get_tools_definition(); validated fail-fast at plugin load."
+        ),
+    )
+    requires_global_tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Global tool names this plugin consumes. Exposed to the plugin's "
+            "agent loop and validated fail-fast at startup."
+        ),
     )
 
     # Extension point for custom metadata

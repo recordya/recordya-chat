@@ -22,6 +22,7 @@ dependencies = [
     "mcp>=1.15",
     "aiosmtplib>=5.1,<6",
     "Pillow>=10.0",
+    "fastmcp>=3.4.2",
 ]
 
 [project.optional-dependencies]

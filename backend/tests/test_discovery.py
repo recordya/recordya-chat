@@ -1,6 +1,7 @@
 """Tests for plugin discovery."""
 
 import logging
+import sys
 import types
 from typing import Any
 from unittest.mock import patch
@@ -8,9 +9,15 @@ from uuid import UUID
 
 import pytest
 
-from src.core.discovery import PluginDiscovery
+from src.core.discovery import PluginDiscovery, PluginLoadError
+from src.core.global_tools import (
+    GlobalToolError,
+    GlobalToolRegistry,
+    get_global_tool_registry,
+)
 from src.core.protocols import BasePlugin, ChatAccessGuard, ViewPlugin
 from src.core.registry import PluginRegistry
+from src.plugin_sdk import FastMCP, FastMCPManagedPlugin
 
 
 class MockPlugin(BasePlugin):
@@ -337,3 +344,352 @@ async def test_multiple_guards_merge_access_info():
         extra.update(await guard.get_access_info(None, test_user_id))
 
     assert extra == {"extra_field": "value", "access_denied": True}
+
+
+# ================= global tool tests =================
+
+
+def _global_tool_def(name: str) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": name,
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    }
+
+
+class GlobalToolPlugin(BasePlugin):
+    """Plugin exporting one of its regular tools via provides_global_tools."""
+
+    name = "global_tool_plugin"
+    display_name = "Global Tool Plugin"
+    description = "Test"
+    version = "1.0.0"
+
+    async def initialize(self, config):
+        pass
+
+    def get_tools_definition(self) -> list[dict[str, Any]]:
+        return [_global_tool_def("shared_tool")]
+
+    async def execute_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {"success": True, "result": [], "row_count": 0}
+
+
+class CollidingGlobalToolPlugin(GlobalToolPlugin):
+    """Second plugin exporting a tool with the same name."""
+
+    name = "colliding_plugin"
+
+
+class FastMCPGlobalToolPlugin(FastMCPManagedPlugin):
+    """FastMCP-managed plugin exporting a local tool via provides_global_tools."""
+
+    name = "fastmcp_global_plugin"
+    display_name = "FastMCP Global Plugin"
+    description = "Test"
+    version = "1.0.0"
+
+    async def get_system_prompt(self) -> str:
+        return "prompt"
+
+    def populate_mcp(self, mcp: FastMCP) -> None:
+        mcp.add_tool(self.shared_tool)
+
+    async def shared_tool(self, value: str) -> dict[str, Any]:
+        """Shared tool."""
+        return {"success": True, "result": [{"value": value}], "row_count": 1}
+
+
+def _providing_manifest(plugin_id: str) -> dict[str, Any]:
+    return {
+        "id": plugin_id,
+        "name": plugin_id,
+        "provides_global_tools": ["shared_tool"],
+    }
+
+
+@pytest.fixture
+def global_registry():
+    """Isolate the process-wide global tool registry per test."""
+    registry = get_global_tool_registry()
+    registry.clear()
+    yield registry
+    registry.clear()
+
+
+@pytest.mark.asyncio
+async def test_load_plugin_registers_global_tools(discovery, global_registry):
+    """Manifest-declared tools are registered during plugin load."""
+    manifest = _providing_manifest("global_tool_plugin")
+    with patch.object(discovery, "_load_manifest", return_value=manifest):
+        await discovery._load_plugin(GlobalToolPlugin, {})
+
+    assert global_registry.has_tool("shared_tool")
+    assert global_registry.get_owner("shared_tool") == "global_tool_plugin"
+
+
+@pytest.mark.asyncio
+async def test_load_fastmcp_managed_plugin_registers_global_tools(
+    discovery, global_registry
+):
+    """FastMCP-managed plugin definitions are ready when global tools register."""
+    manifest = _providing_manifest("fastmcp_global_plugin")
+    with patch.object(discovery, "_load_manifest", return_value=manifest):
+        await discovery._load_plugin(FastMCPGlobalToolPlugin, {})
+
+    assert global_registry.has_tool("shared_tool")
+    assert global_registry.get_owner("shared_tool") == "fastmcp_global_plugin"
+
+
+@pytest.mark.asyncio
+async def test_load_plugin_without_declaration_registers_nothing(
+    discovery, global_registry
+):
+    """No provides_global_tools in manifest means no global registration."""
+    await discovery._load_plugin(GlobalToolPlugin, {})
+
+    assert not global_registry.has_tool("shared_tool")
+
+
+@pytest.mark.asyncio
+async def test_global_tool_collision_aborts_startup(discovery, global_registry):
+    """A tool-name collision propagates and aborts startup; first registration wins."""
+    with patch.object(
+        discovery,
+        "_load_manifest",
+        return_value=_providing_manifest("global_tool_plugin"),
+    ):
+        await discovery._load_plugin(GlobalToolPlugin, {})
+    with patch.object(
+        discovery,
+        "_load_manifest",
+        return_value=_providing_manifest("colliding_plugin"),
+    ):
+        with pytest.raises(GlobalToolError, match="collides"):
+            await discovery._load_plugin(CollidingGlobalToolPlugin, {})
+
+    assert discovery.get_plugin("colliding_plugin") is None
+    assert global_registry.get_owner("shared_tool") == "global_tool_plugin"
+
+
+@pytest.mark.asyncio
+async def test_declared_tool_missing_from_definitions_aborts_startup(
+    discovery, global_registry
+):
+    """A manifest declaring a tool absent from get_tools_definition aborts startup."""
+    manifest = {
+        "id": "global_tool_plugin",
+        "name": "Global Tool Plugin",
+        "provides_global_tools": ["nonexistent_tool"],
+    }
+    with patch.object(discovery, "_load_manifest", return_value=manifest):
+        with pytest.raises(GlobalToolError, match="nonexistent_tool"):
+            await discovery._load_plugin(GlobalToolPlugin, {})
+
+    assert discovery.get_plugin("global_tool_plugin") is None
+    assert not global_registry.has_tool("nonexistent_tool")
+
+
+def _plugin_class_with_manifest(tmp_path, base_class, manifest_yaml: str) -> type:
+    """Create a plugin class whose module dir contains the given manifest.yaml."""
+    module_name = f"fake_manifest_module_{base_class.__name__}"
+    module = types.ModuleType(module_name)
+    module.__file__ = str(tmp_path / "__init__.py")
+    sys.modules[module_name] = module
+    (tmp_path / "manifest.yaml").write_text(manifest_yaml)
+    return type(f"Fake{base_class.__name__}", (base_class,), {"__module__": module_name})
+
+
+@pytest.mark.asyncio
+async def test_non_list_provides_manifest_aborts_startup(
+    discovery, global_registry, tmp_path
+):
+    """A manifest with a string provides_global_tools fails Pydantic validation."""
+    plugin_class = _plugin_class_with_manifest(
+        tmp_path,
+        GlobalToolPlugin,
+        'id: "global_tool_plugin"\n'
+        'name: "Global Tool Plugin"\n'
+        'provides_global_tools: "shared_tool"\n',
+    )
+    try:
+        with pytest.raises(PluginLoadError, match="Invalid manifest"):
+            await discovery._load_plugin(plugin_class, {})
+    finally:
+        del sys.modules[plugin_class.__module__]
+
+    assert discovery.get_plugin("global_tool_plugin") is None
+    assert not global_registry.has_tool("shared_tool")
+
+
+@pytest.mark.asyncio
+async def test_validate_required_global_tools_missing_raises(
+    discovery, global_registry
+):
+    """Startup validation fails fast when a required global tool is absent."""
+    manifest = {
+        "id": "mock_plugin",
+        "name": "Mock",
+        "requires_global_tools": ["absent_tool"],
+    }
+    with patch.object(discovery, "_load_manifest", return_value=manifest):
+        await discovery._load_plugin(MockPlugin, {})
+
+    with pytest.raises(PluginLoadError, match="absent_tool"):
+        discovery._validate_required_global_tools()
+
+
+@pytest.mark.asyncio
+async def test_non_list_requires_manifest_aborts_startup(
+    discovery, global_registry, tmp_path
+):
+    """A manifest with a string requires_global_tools fails Pydantic validation."""
+    plugin_class = _plugin_class_with_manifest(
+        tmp_path,
+        MockPlugin,
+        'id: "mock_plugin"\n'
+        'name: "Mock"\n'
+        'requires_global_tools: "shared_tool"\n',
+    )
+    try:
+        with pytest.raises(PluginLoadError, match="Invalid manifest"):
+            await discovery._load_plugin(plugin_class, {})
+    finally:
+        del sys.modules[plugin_class.__module__]
+
+    assert discovery.get_plugin("mock_plugin") is None
+
+
+@pytest.mark.asyncio
+async def test_validate_required_global_tools_present_passes(
+    discovery, global_registry
+):
+    """Validation passes when required global tools are provided."""
+    with patch.object(
+        discovery,
+        "_load_manifest",
+        return_value=_providing_manifest("global_tool_plugin"),
+    ):
+        await discovery._load_plugin(GlobalToolPlugin, {})
+    manifest = {
+        "id": "mock_plugin",
+        "name": "Mock",
+        "requires_global_tools": ["shared_tool"],
+    }
+    with patch.object(discovery, "_load_manifest", return_value=manifest):
+        await discovery._load_plugin(MockPlugin, {})
+
+    discovery._validate_required_global_tools()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_all_unregisters_global_tools(discovery, global_registry):
+    """Shutdown removes exported tools from the global registry."""
+    manifest = _providing_manifest("global_tool_plugin")
+    with patch.object(discovery, "_load_manifest", return_value=manifest):
+        await discovery._load_plugin(GlobalToolPlugin, {})
+    assert global_registry.has_tool("shared_tool")
+
+    await discovery.shutdown_all()
+
+    assert not global_registry.has_tool("shared_tool")
+
+
+@pytest.mark.asyncio
+async def test_failed_discovery_cleans_up_plugins_and_global_registry(
+    discovery, global_registry
+):
+    """A required-global-tools validation failure leaves no partial state."""
+
+    async def load_provider_then_broken_consumer(configs):
+        with patch.object(
+            discovery,
+            "_load_manifest",
+            return_value=_providing_manifest("global_tool_plugin"),
+        ):
+            await discovery._load_plugin(GlobalToolPlugin, configs)
+
+        manifest = {
+            "id": "mock_plugin",
+            "name": "Mock",
+            "requires_global_tools": ["absent_tool"],
+        }
+        with patch.object(discovery, "_load_manifest", return_value=manifest):
+            await discovery._load_plugin(MockPlugin, configs)
+
+    with patch.object(
+        discovery,
+        "_discover_entry_points",
+        side_effect=load_provider_then_broken_consumer,
+    ):
+        with pytest.raises(PluginLoadError, match="absent_tool"):
+            await discovery.discover_and_load()
+
+    assert discovery.list_plugins() == []
+    assert global_registry.list_tools() == []
+
+
+def test_registry_collision_raises():
+    """Registering the same tool name from two plugins fails."""
+    registry = GlobalToolRegistry()
+    plugin = GlobalToolPlugin()
+    registry.register_plugin("first", plugin, ["shared_tool"])
+
+    with pytest.raises(GlobalToolError, match="collides"):
+        registry.register_plugin("second", plugin, ["shared_tool"])
+
+
+def test_registry_registration_is_all_or_nothing():
+    """On any collision, none of the plugin's tools are registered."""
+
+    class TwoToolPlugin:
+        def get_tools_definition(self) -> list[dict[str, Any]]:
+            return [_global_tool_def("brand_new_tool"), _global_tool_def("shared_tool")]
+
+        async def execute_tool(self, tool_name, arguments):
+            return {"success": True, "result": [], "row_count": 0}
+
+    registry = GlobalToolRegistry()
+    registry.register_plugin("first", GlobalToolPlugin(), ["shared_tool"])
+
+    with pytest.raises(GlobalToolError):
+        registry.register_plugin(
+            "second", TwoToolPlugin(), ["brand_new_tool", "shared_tool"]
+        )
+
+    assert not registry.has_tool("brand_new_tool")
+    assert registry.get_owner("shared_tool") == "first"
+
+
+def test_registry_missing_declared_tool_raises():
+    """Declaring a tool absent from get_tools_definition fails registration."""
+    registry = GlobalToolRegistry()
+
+    with pytest.raises(GlobalToolError, match="absent"):
+        registry.register_plugin("first", GlobalToolPlugin(), ["nonexistent_tool"])
+
+    assert not registry.has_tool("nonexistent_tool")
+
+
+def test_registry_plugin_without_tool_surface_raises():
+    """A plugin without get_tools_definition/execute_tool cannot export tools."""
+    registry = GlobalToolRegistry()
+
+    with pytest.raises(GlobalToolError, match="does not expose"):
+        registry.register_plugin("first", object(), ["shared_tool"])
+
+
+@pytest.mark.asyncio
+async def test_registry_execute_unknown_tool_returns_error_result():
+    """Executing an unregistered tool returns a standard error payload."""
+    registry = GlobalToolRegistry()
+
+    result = await registry.execute("nope", {})
+
+    assert result["success"] is False
+    assert "nope" in result["error"]

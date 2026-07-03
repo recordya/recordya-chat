@@ -6,12 +6,20 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
+from pydantic import ValidationError
 
 from .exceptions import AppException
-from .protocols import BasePlugin, ChatAccessGuard, HttpRoutablePlugin, UserLifecycleHook
+from .global_tools import GlobalToolError, get_global_tool_registry
+from .protocols import (
+    BasePlugin,
+    ChatAccessGuard,
+    HttpRoutablePlugin,
+    ToolSurface,
+    UserLifecycleHook,
+)
 from src.plugin_sdk.manifest import PluginManifest
 
 logger = logging.getLogger(__name__)
@@ -60,14 +68,24 @@ class PluginDiscovery:
         configs = configs or {}
         self._only = frozenset(only) if only else None
 
-        # 1. Discover from entry points
-        await self._discover_entry_points(configs)
+        try:
+            # 1. Discover from entry points
+            await self._discover_entry_points(configs)
 
-        # 2. Discover from plugins folder
-        if self.plugins_dir and self.plugins_dir.exists():
-            await self._discover_folder(configs)
+            # 2. Discover from plugins folder
+            if self.plugins_dir and self.plugins_dir.exists():
+                await self._discover_folder(configs)
 
-        self._only = None
+            # Fail fast when a loaded plugin requires a global tool nobody provides
+            self._validate_required_global_tools()
+        except (GlobalToolError, PluginLoadError):
+            # Hard discovery/config errors abort startup; do not leave partially
+            # loaded plugins or stale global tool registrations behind.
+            await self.shutdown_all()
+            raise
+        finally:
+            self._only = None
+
         return self._plugins
 
     async def _discover_entry_points(self, configs: dict[str, dict[str, Any]]) -> None:
@@ -84,9 +102,15 @@ class PluginDiscovery:
                 try:
                     plugin_class = ep.load()
                     await self._load_plugin(plugin_class, configs)
+                except (GlobalToolError, PluginLoadError):
+                    raise
                 except Exception as e:
-                    logger.warning(f"Failed to load entry point '{ep.name}': {e}")
+                    logger.warning(
+                        f"Failed to load entry point '{ep.name}': {e}", exc_info=True
+                    )
 
+        except (GlobalToolError, PluginLoadError):
+            raise
         except Exception as e:
             logger.debug(f"Entry point discovery failed: {e}")
 
@@ -117,8 +141,12 @@ class PluginDiscovery:
                     # Legacy structure: plugins/my_plugin/__init__.py
                     elif (item / "__init__.py").exists():
                         await self._load_from_package(item, configs)
+            except (GlobalToolError, PluginLoadError):
+                raise
             except Exception as e:
-                logger.warning(f"Failed to load plugin from '{item}': {e}")
+                logger.warning(
+                    f"Failed to load plugin from '{item}': {e}", exc_info=True
+                )
 
     async def _load_from_file(self, path: Path, configs: dict[str, dict[str, Any]]) -> None:
         """Load plugin from a single .py file."""
@@ -171,7 +199,9 @@ class PluginDiscovery:
                     await self._load_plugin(attr, configs)
 
         except ImportError as e:
-            logger.warning(f"Failed to import plugin package '{package_name}': {e}")
+            logger.warning(
+                f"Failed to import plugin package '{package_name}': {e}", exc_info=True
+            )
 
     async def _load_from_unified_package(self, path: Path, configs: dict[str, dict[str, Any]]) -> None:
         """Load plugin from unified structure: plugins/my_plugin/backend/."""
@@ -203,7 +233,9 @@ class PluginDiscovery:
                     await self._load_plugin(attr, configs)
 
         except ImportError as e:
-            logger.warning(f"Failed to import unified plugin '{package_name}': {e}")
+            logger.warning(
+                f"Failed to import unified plugin '{package_name}': {e}", exc_info=True
+            )
 
     @staticmethod
     def _register_access_guards(module: Any, package_name: str) -> None:
@@ -277,24 +309,32 @@ class PluginDiscovery:
 
     def _load_manifest(self, plugin_class: type) -> dict[str, Any] | None:
         """Load manifest.yaml from plugin module directory.
-        
+
         Manifest is the single source of truth for plugin metadata.
+        Validation is delegated to the ``PluginManifest`` Pydantic model;
+        an invalid manifest is a hard configuration error that raises
+        ``PluginLoadError`` and aborts startup.
         """
         try:
             module = sys.modules.get(plugin_class.__module__)
-            if module and hasattr(module, "__file__") and module.__file__:
-                manifest_path = Path(module.__file__).parent / "manifest.yaml"
-                if manifest_path.exists():
-                    with open(manifest_path) as f:
-                        raw_manifest = yaml.safe_load(f) or {}
-                        try:
-                            manifest = PluginManifest.model_validate(raw_manifest)
-                            return manifest.model_dump(mode="python")
-                        except Exception as exc:
-                            logger.warning(
-                                f"Manifest validation failed for {plugin_class.__name__}: {exc}"
-                            )
-                            return raw_manifest
+            if not (module and hasattr(module, "__file__") and module.__file__):
+                return None
+
+            manifest_path = Path(module.__file__).parent / "manifest.yaml"
+            if not manifest_path.exists():
+                return None
+
+            with open(manifest_path) as f:
+                raw_manifest = yaml.safe_load(f) or {}
+
+            manifest = PluginManifest.model_validate(raw_manifest)
+            return manifest.model_dump(mode="python")
+        except ValidationError as exc:
+            raise PluginLoadError(
+                f"Invalid manifest.yaml for {plugin_class.__name__}: {exc}"
+            ) from exc
+        except PluginLoadError:
+            raise
         except Exception as e:
             logger.debug(f"Failed to load manifest for {plugin_class.__name__}: {e}")
         return None
@@ -363,12 +403,23 @@ class PluginDiscovery:
                 await plugin.shutdown()
                 return
 
+            # Register contributed global tools (fail-fast on collisions)
+            try:
+                self._register_global_tools(name, plugin)
+            except Exception:
+                await plugin.shutdown()
+                raise
+
             # Register
             self._plugins[name] = plugin
             logger.info(f"Plugin '{name}' loaded successfully")
 
-        except Exception as e:
-            logger.error(f"Failed to load plugin {plugin_class.__name__}: {e}")
+        except (GlobalToolError, PluginLoadError):
+            # Global-tool declaration errors are hard config errors: abort startup
+            logger.exception(f"Failed to load plugin {plugin_class.__name__}")
+            raise
+        except Exception:
+            logger.exception(f"Failed to load plugin {plugin_class.__name__}")
 
     @staticmethod
     def _load_plugin_env(plugin_dir: Path) -> dict[str, str]:
@@ -441,6 +492,37 @@ class PluginDiscovery:
 
         return {}
 
+    def _register_global_tools(self, name: str, plugin: BasePlugin) -> None:
+        """Register manifest-declared global tools in the global registry.
+
+        The manifest's ``provides_global_tools`` list is authoritative:
+        each name must exist in the plugin's regular ``get_tools_definition()``,
+        otherwise the plugin fails to load. Field types are guaranteed by the
+        ``PluginManifest`` Pydantic model validated in ``_load_manifest``.
+        """
+        declared = plugin.get_manifest().get("provides_global_tools") or []
+        if not declared:
+            return
+
+        registered = get_global_tool_registry().register_plugin(
+            name, cast(ToolSurface, plugin), declared
+        )
+        logger.info(f"Plugin '{name}' registered global tools: {registered}")
+
+    def _validate_required_global_tools(self) -> None:
+        """Fail fast when required global tools are missing after discovery."""
+        registry = get_global_tool_registry()
+        missing: list[str] = []
+        for name, plugin in self._plugins.items():
+            required = plugin.get_manifest().get("requires_global_tools") or []
+            absent = sorted(t for t in required if not registry.has_tool(t))
+            if absent:
+                missing.append(f"plugin '{name}' requires {', '.join(absent)}")
+        if missing:
+            raise PluginLoadError(
+                "Missing required global tools: " + "; ".join(missing)
+            )
+
     def get_plugin(self, name: str) -> BasePlugin | None:
         """Get a loaded plugin by name."""
         return self._plugins.get(name)
@@ -455,8 +537,10 @@ class PluginDiscovery:
 
     async def shutdown_all(self) -> None:
         """Shutdown all loaded plugins."""
+        registry = get_global_tool_registry()
         for name, plugin in self._plugins.items():
             try:
+                registry.unregister_plugin(name)
                 await plugin.shutdown()
                 logger.info(f"Plugin '{name}' shut down")
             except Exception as e:

@@ -9,10 +9,13 @@ Available exports:
 - ManagedPlugin: ABC for service-managed plugins (tool loop)
 - ViewPlugin: ABC for custom UI view plugins (not chat agents)
 - BaseSQLPlugin: Concrete base for SQL-based ManagedPlugin (PostgreSQL)
+- FastMCPManagedPlugin: ManagedPlugin base for local FastMCP tools (populate_mcp)
 - CoreEngine: LLM and tool execution primitives
 - LLMRequest, LLMResponse, ToolCall, ToolResult: Type definitions
 - create_tool_definition: Helper function
 """
+
+from typing import Any
 
 from src.core.engine import CoreEngine
 from src.core.protocols import (
@@ -34,6 +37,13 @@ from src.core.roles import (
     is_super_admin,
 )
 from src.plugin_sdk.manifest import PluginManifest
+from src.plugin_sdk.mcp import (
+    FastMCP,
+    FastMCPManagedPlugin,
+    FastMcpToolAdapter,
+    McpToolProvider,
+    create_fastmcp_tool_adapter,
+)
 from src.plugin_sdk.sql import BaseSQLPlugin
 
 __all__ = [
@@ -52,6 +62,12 @@ __all__ = [
     "ToolResult",
     # Manifest
     "PluginManifest",
+    # MCP
+    "FastMCP",
+    "McpToolProvider",
+    "FastMcpToolAdapter",
+    "FastMCPManagedPlugin",
+    "create_fastmcp_tool_adapter",
     # Roles
     "ROLE_USER",
     "ROLE_ADMIN",
@@ -66,21 +82,21 @@ __all__ = [
 def create_tool_definition(
     name: str,
     description: str,
-    parameters: dict | None = None,
+    parameters: dict[str, Any] | None = None,
     status_hint: str | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Create OpenAI-compatible tool definition.
-    
+
     Args:
         name: Tool name
         description: Tool description for LLM
         parameters: JSON Schema for parameters (defaults to empty object)
         status_hint: Optional UI status hint
-        
+
     Returns:
         OpenAI-compatible tool definition dict
     """
-    tool: dict = {
+    tool: dict[str, Any] = {
         "type": "function",
         "function": {
             "name": name,

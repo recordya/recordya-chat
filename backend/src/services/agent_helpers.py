@@ -10,7 +10,13 @@ import uuid
 from typing import Any, Literal
 
 from src.core.config import settings
-from src.core.protocols import ContextConfig, ManagedPlugin
+from src.core.global_tools import GlobalToolRegistry
+from src.core.protocols import (
+    ContextConfig,
+    ManagedPlugin,
+    ToolProvider,
+    tool_definition_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -346,12 +352,82 @@ class ConversationBuilder:
         return max(1, len(text) // 4)
 
 
+class CompositeToolProvider:
+    """Merge the active plugin's tools with opted-in global tools.
+
+    Exposes the same tool surface AgentService needs (definitions, argument
+    preparation, execution). The active plugin's own tools take priority on
+    name collisions. Global tools are opt-in: only names listed in the plugin
+    manifest's ``requires_global_tools`` are exposed, so agents are not
+    polluted with unrelated tools.
+    """
+
+    def __init__(self, plugin: ManagedPlugin, registry: GlobalToolRegistry) -> None:
+        self._plugin = plugin
+        self._registry = registry
+        self._allowed_global_tools = frozenset(
+            plugin.get_manifest().get("requires_global_tools") or []
+        )
+
+    def get_tools_definition(self) -> list[dict[str, Any]]:
+        """Return plugin tools plus opted-in global tools (deduplicated by name)."""
+        plugin_tools = self._plugin.get_tools_definition()
+        if not self._allowed_global_tools:
+            return plugin_tools
+        plugin_names = {tool_definition_name(t) for t in plugin_tools}
+        global_tools = [
+            definition
+            for definition in self._registry.get_tools_definition()
+            if tool_definition_name(definition) in self._allowed_global_tools
+            and tool_definition_name(definition) not in plugin_names
+        ]
+        return plugin_tools + global_tools
+
+    def prepare_tool_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        question: str | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Delegate to the plugin hook for its own tools; pass through for global."""
+        if self._is_global_call(tool_name):
+            return arguments
+        return self._plugin.prepare_tool_arguments(
+            tool_name=tool_name,
+            arguments=arguments,
+            question=question,
+            conversation_history=conversation_history,
+        )
+
+    async def execute_tool(
+        self, tool_name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Route to the global registry for opted-in tools, otherwise the plugin."""
+        if self._is_global_call(tool_name):
+            return await self._registry.execute(tool_name, arguments)
+        return await self._plugin.execute_tool(tool_name, arguments)
+
+    def _is_global_call(self, tool_name: str) -> bool:
+        """A call routes to the registry only for opted-in, non-local tools."""
+        if not self._allowed_global_tools:
+            return False
+        if tool_name not in self._allowed_global_tools:
+            return False
+        if not self._registry.has_tool(tool_name):
+            return False
+        plugin_names = {
+            tool_definition_name(t) for t in self._plugin.get_tools_definition()
+        }
+        return tool_name not in plugin_names
+
+
 class ToolExecutionService:
     """Execute tool calls via plugin and track results."""
 
     def __init__(
         self,
-        plugin: ManagedPlugin,
+        plugin: ToolProvider,
         langfuse: Any | None,
         question: str | None = None,
         conversation_history: list[dict[str, Any]] | None = None,

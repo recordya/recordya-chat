@@ -652,6 +652,92 @@ ChatAccessGuard (Protocol)  ← plugin-provided access control hook
 | `prepare_tool_arguments(name, args, question=None, conversation_history=None) -> dict[str, Any]` | Optional hook to deterministically normalize/enrich arguments before tool execution |
 | `execute_tool(name, args) -> dict[str, Any]` | Run tool and return payload/result metadata |
 
+#### Local FastMCP tools
+
+Plugins may register local typed tools through the stable Plugin SDK FastMCP
+integration. This lets plugin authors write ordinary typed Python functions and
+use FastMCP for schema generation and validation while `AgentService` continues
+to call `get_tools_definition()` / `execute_tool()`.
+
+For plugins whose local tools come solely from FastMCP, extend
+`FastMCPManagedPlugin`: `populate_mcp()` is the single source of truth and the
+base class implements `get_tools_definition()` / `execute_tool()` for you.
+
+```python
+from src.plugin_sdk import FastMCP, FastMCPManagedPlugin
+
+
+class MyPlugin(FastMCPManagedPlugin):
+    name = "my_plugin"
+
+    async def get_system_prompt(self) -> str:
+        return "You are a helpful plugin."
+
+    def populate_mcp(self, mcp: FastMCP) -> None:
+        mcp.tool(meta={"status_hint": "Listing items..."})(self.list_items)
+
+    async def list_items(self, limit: int = 10) -> dict[str, Any]:
+        """List items."""
+        return {"success": True, "result": [], "row_count": 0}
+```
+
+Use FastMCP `meta={"status_hint": "..."}` to attach Recordya UI status
+hints to local FastMCP tools.
+
+If you override `initialize()`, call `await super().initialize(config)` after
+your own setup so tool definitions are ready before discovery validates
+manifest-declared global tools.
+
+Hybrid plugins that merge local FastMCP tools with another tool source (e.g. a
+remote MCP server) should keep using the lower-level
+`create_fastmcp_tool_adapter()` and implement their own
+`get_tools_definition()` / `execute_tool()` merging.
+
+#### Global tools
+
+Plugins can share tools with other plugins without any direct dependency.
+"Globalness" is purely declarative — an exported tool is a regular entry of
+the plugin's `get_tools_definition()` and executes through its standard
+`execute_tool()`; there is no separate implementation channel.
+
+**Provider** — export a tool with one line in `manifest.yaml`:
+
+```yaml
+provides_global_tools:
+  - "format_table"
+```
+
+**Consumer** — opt in via `manifest.yaml` (only listed tools are added to that
+plugin's agent loop; other agents never see them):
+
+```yaml
+requires_global_tools:
+  - "format_table"
+```
+
+Validation is fail-fast at startup — each of these errors aborts application
+startup:
+
+- a `manifest.yaml` that fails `PluginManifest` schema validation (a missing
+  manifest is fine; an invalid one is a hard configuration error),
+- a declared name absent from the provider's `get_tools_definition()`,
+- a tool-name collision between two providers (registration is all-or-nothing
+  per plugin),
+- a required tool with no provider in the deployment.
+
+When the LLM calls a global tool, `CompositeToolProvider` routes the call to
+the owning plugin's `execute_tool()`. On a name collision the consumer's own
+local tool takes priority (shadows the global one).
+
+Global tools receive all their input through regular tool arguments — there is
+no implicit shared state between tools.
+
+**Authorization:** `ChatAccessGuard` controls only whether a user can open a
+chat with the active plugin in the UI. It is not checked again when that plugin
+calls a global tool owned by another plugin. Treat `provides_global_tools` as a
+public API for other plugins; if a tool needs per-user restrictions, implement
+them inside the tool itself.
+
 ### BaseSQLPlugin (for SQL sources)
 
 Provides: PostgreSQL pool, SQL validation, tool routing, prompt templating.
@@ -895,6 +981,12 @@ welcome:
 frontend:
   public_widgets:
     - "shared_widget_type"
+
+# Optional: cross-plugin tool sharing (see "Global tools" in Reference)
+provides_global_tools:      # export own tools to other plugins
+  - "format_table"
+requires_global_tools:      # opt in to tools exported by other plugins
+  - "format_table"
 ```
 
 #### View plugin manifest
