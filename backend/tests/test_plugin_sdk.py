@@ -338,5 +338,3 @@ def test_is_super_admin_is_exclusive():
     assert is_super_admin(ROLE_ADMIN) is False
     assert is_super_admin(ROLE_USER) is False
     assert is_super_admin(None) is False
-
-

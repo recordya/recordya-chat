@@ -27,12 +27,17 @@ from langfuse import propagate_attributes
 from src.core.config import settings
 from src.core.engine import CoreEngine
 from src.core.exceptions import LLMError
+from src.core.global_tools import get_global_tool_registry
 from src.core.i18n import translate
 from src.core.langfuse import get_langfuse
 from src.core.protocols import BasePlugin, ExecutablePlugin, ManagedPlugin
 from src.llm.client import LlmFacade
 from src.plugin_sdk.sql import BaseSQLPlugin
-from src.services.agent_helpers import ConversationBuilder, ToolExecutionService
+from src.services.agent_helpers import (
+    CompositeToolProvider,
+    ConversationBuilder,
+    ToolExecutionService,
+)
 from src.services.factory import get_engine
 from src.services.leaked_tool_guard import LeakedToolGuard
 
@@ -346,8 +351,9 @@ class AgentService:
         builder = ConversationBuilder(plugin)
         messages = await builder.build_messages(question, conversation_history)
 
-        # Get tools from plugin
-        tools = plugin.get_tools_definition()
+        # Get tools from plugin merged with opted-in global tools
+        tool_provider = CompositeToolProvider(plugin, get_global_tool_registry())
+        tools = tool_provider.get_tools_definition()
 
         leaked_guard = LeakedToolGuard.from_tools(tools)
 
@@ -358,7 +364,7 @@ class AgentService:
         tool_history: list[dict[str, Any]] = []
         iterations = 0
         tool_executor = ToolExecutionService(
-            plugin,
+            tool_provider,
             lf_run._langfuse,
             question=question,
             conversation_history=conversation_history,
@@ -474,7 +480,9 @@ class AgentService:
                 parsed_calls = tool_executor.parse_tool_calls(tool_calls)
                 for call in parsed_calls:
                     reasoning = call["arguments"].pop("reasoning", None)
-                    status_message = reasoning or self._get_status_hint(call["tool_name"])
+                    status_message = reasoning or self._get_status_hint(
+                        call["tool_name"], tools
+                    )
                     yield {
                         "type": "status",
                         "data": {
@@ -552,14 +560,10 @@ class AgentService:
             if not lf_run.finished:
                 lf_run.finish(level="WARNING", status_message="cancelled")
 
-    def _get_status_hint(self, tool_name: str) -> str:
-        """Get status hint for a tool from defaults or plugin definition."""
-        # Check plugin tools for status_hint
-        tools = (
-            self.plugin.get_tools()
-            if self._is_executable_plugin()
-            else self.plugin.get_tools_definition()
-        )
+    def _get_status_hint(
+        self, tool_name: str, tools: list[dict[str, Any]]
+    ) -> str:
+        """Get status hint for a tool from the provided definitions or defaults."""
         for tool in tools:
             func = tool.get("function", {})
             if func.get("name") == tool_name:
