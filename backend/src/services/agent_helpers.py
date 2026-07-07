@@ -7,6 +7,8 @@ import logging
 import math
 import time
 import uuid
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from src.core.config import settings
@@ -21,6 +23,82 @@ from src.core.protocols import (
 logger = logging.getLogger(__name__)
 
 _TurnMode = Literal["full", "degraded", "text_only"]
+
+
+@dataclass(frozen=True)
+class ReplayTurnTokenDiagnostics:
+    """Token estimates for one replayed conversation turn."""
+
+    full: int
+    degraded: int
+    text_only: int
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "full": self.full,
+            "degraded": self.degraded,
+            "text_only": self.text_only,
+        }
+
+
+@dataclass(frozen=True)
+class ReplayTurnDiagnostics:
+    """Diagnostics for replay mode selection of one conversation turn."""
+
+    turn_index: int
+    selected_mode: _TurnMode
+    selected_tokens: int
+    fits_budget: bool
+    tokens: ReplayTurnTokenDiagnostics
+    tool_count: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "turn_index": self.turn_index,
+            "selected_mode": self.selected_mode,
+            "selected_tokens": self.selected_tokens,
+            "fits_budget": self.fits_budget,
+            "tokens": self.tokens.to_dict(),
+            "tool_count": self.tool_count,
+        }
+
+
+@dataclass(frozen=True)
+class ConversationReplayDiagnostics:
+    """Structured diagnostics for replayed tool-call conversation history."""
+
+    enabled: bool
+    turns_total: int
+    turns_replayed: int
+    budget_initial: int
+    budget_remaining: int
+    selected_modes: list[_TurnMode] = field(default_factory=list)
+    mode_counts: dict[_TurnMode, int] = field(default_factory=dict)
+    over_budget_turns: int = 0
+    truncated: bool = False
+    turns: list[ReplayTurnDiagnostics] = field(default_factory=list)
+
+    @property
+    def degraded_count(self) -> int:
+        return self.mode_counts.get("degraded", 0)
+
+    @property
+    def text_only_count(self) -> int:
+        return self.mode_counts.get("text_only", 0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "turns_total": self.turns_total,
+            "turns_replayed": self.turns_replayed,
+            "budget_initial": self.budget_initial,
+            "budget_remaining": self.budget_remaining,
+            "selected_modes": list(self.selected_modes),
+            "mode_counts": dict(self.mode_counts),
+            "over_budget_turns": self.over_budget_turns,
+            "truncated": self.truncated,
+            "turns": [turn.to_dict() for turn in self.turns],
+        }
 
 
 def _sanitize_floats(obj: Any) -> Any:
@@ -58,10 +136,13 @@ class ConversationBuilder:
             if hasattr(plugin, "get_context_config")
             else None
         )
+        self.last_replay_diagnostics: ConversationReplayDiagnostics | None = None
 
     async def build_messages(
             self, question: str, conversation_history: list[dict[str, Any]] | None
     ) -> list[dict[str, Any]]:
+        self.last_replay_diagnostics = None
+
         # Plugin builds complete system prompt (including dynamic data)
         system_prompt = await self._plugin.get_system_prompt()
 
@@ -74,7 +155,11 @@ class ConversationBuilder:
 
         # New path: any assistant message has toolResults → replay tool-call history
         if self._history_has_tool_results(conversation_history):
-            messages.extend(self._build_tool_replay(conversation_history))
+            replay_messages, diagnostics = self._build_tool_replay_with_diagnostics(
+                conversation_history
+            )
+            self.last_replay_diagnostics = diagnostics
+            messages.extend(replay_messages)
             messages.append({"role": "user", "content": question})
             return messages
 
@@ -230,15 +315,29 @@ class ConversationBuilder:
     def _build_tool_replay(
             cls, history: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        messages, _diagnostics = cls._build_tool_replay_with_diagnostics(history)
+        return messages
+
+    @classmethod
+    def _build_tool_replay_with_diagnostics(
+            cls, history: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], ConversationReplayDiagnostics]:
         """Replay last N turns into LLM messages with a token budget.
 
         Newest turns get ``full`` mode; if the budget runs low, older turns
         degrade to ``degraded`` (truncated rows) and finally ``text_only``.
         """
-        turns = cls._group_into_turns(history)
-        turns = turns[-settings.CONVERSATION_MAX_TURNS:]
+        all_turns = cls._group_into_turns(history)
+        turns = all_turns[-settings.CONVERSATION_MAX_TURNS:]
+        initial_budget = settings.CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET
         if not turns:
-            return []
+            return [], ConversationReplayDiagnostics(
+                enabled=True,
+                turns_total=len(all_turns),
+                turns_replayed=0,
+                budget_initial=initial_budget,
+                budget_remaining=initial_budget,
+            )
 
         serialized_by_mode: list[dict[_TurnMode, dict[str, Any]]] = [
             {
@@ -249,20 +348,66 @@ class ConversationBuilder:
             for user, assistant in turns
         ]
 
-        budget = settings.CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET
+        budget = initial_budget
         selected: list[_TurnMode] = ["text_only"] * len(turns)
+        turn_diagnostics: list[ReplayTurnDiagnostics | None] = [None for _ in turns]
         for idx in range(len(turns) - 1, -1, -1):
+            selected_mode: _TurnMode | None = None
+            selected_cost: int | None = None
             for mode in ("full", "degraded", "text_only"):
                 cost = serialized_by_mode[idx][mode]["tokens"]
                 if cost <= budget:
                     selected[idx] = mode
                     budget -= cost
+                    selected_mode = mode
+                    selected_cost = cost
                     break
+            selected_fits_budget = selected_mode is not None
+            if selected_mode is None:
+                selected_mode = "text_only"
+                selected_cost = serialized_by_mode[idx]["text_only"]["tokens"]
+
+            assistant_msg = turns[idx][1]
+            tool_results = (
+                assistant_msg.get("toolResults")
+                if isinstance(assistant_msg, dict)
+                else None
+            )
+            turn_diagnostics[idx] = ReplayTurnDiagnostics(
+                turn_index=idx,
+                selected_mode=selected_mode,
+                selected_tokens=selected_cost,
+                fits_budget=selected_fits_budget,
+                tokens=ReplayTurnTokenDiagnostics(
+                    full=serialized_by_mode[idx]["full"]["tokens"],
+                    degraded=serialized_by_mode[idx]["degraded"]["tokens"],
+                    text_only=serialized_by_mode[idx]["text_only"]["tokens"],
+                ),
+                tool_count=len(tool_results) if isinstance(tool_results, list) else 0,
+            )
 
         out: list[dict[str, Any]] = []
         for idx in range(len(turns)):
             out.extend(serialized_by_mode[idx][selected[idx]]["messages"])
-        return out
+
+        resolved_turn_diagnostics = [turn for turn in turn_diagnostics if turn is not None]
+        mode_counts = dict(Counter(selected))
+        over_budget_turns = sum(
+            1 for turn in resolved_turn_diagnostics if not turn.fits_budget
+        )
+        diagnostics = ConversationReplayDiagnostics(
+            enabled=True,
+            turns_total=len(all_turns),
+            turns_replayed=len(turns),
+            budget_initial=initial_budget,
+            budget_remaining=budget,
+            selected_modes=selected,
+            mode_counts=mode_counts,
+            over_budget_turns=over_budget_turns,
+            truncated=any(mode != "full" for mode in selected),
+            turns=resolved_turn_diagnostics,
+        )
+        return out, diagnostics
 
     @classmethod
     def _serialize_turn(
@@ -327,20 +472,34 @@ class ConversationBuilder:
 
     @staticmethod
     def _degrade_result(result: Any) -> Any:
-        """Truncate large row lists; keep widget payloads truncated in-place."""
+        """Truncate large row lists in common tool result shapes."""
         max_rows = settings.CONVERSATION_DEGRADED_MAX_ROWS
         if not isinstance(result, dict):
             return result
+
+        degraded: dict[str, Any] | None = None
+
         inner = result.get("result")
-        if not isinstance(inner, list) or len(inner) <= max_rows:
+        if isinstance(inner, list) and len(inner) > max_rows:
+            degraded = dict(result)
+            degraded["result"] = list(inner[:max_rows])
+            degraded["_result_truncated"] = True
+            degraded["_original_row_count"] = len(inner)
+            degraded["_retained_row_count"] = max_rows
+
+        entries = result.get("entries")
+        if isinstance(entries, list) and len(entries) > max_rows:
+            if degraded is None:
+                degraded = dict(result)
+            degraded["entries"] = list(entries[:max_rows])
+            degraded["_entries_truncated"] = True
+            degraded["_original_entries_count"] = len(entries)
+            degraded["_retained_entries_count"] = max_rows
+
+        if degraded is None:
             return result
-        truncated_inner: list[Any] = []
-        for item in inner[:max_rows]:
-            truncated_inner.append(item)
-        degraded = dict(result)
-        degraded["result"] = truncated_inner
+
         degraded["_truncated"] = True
-        degraded["_original_row_count"] = len(inner)
         return degraded
 
     @staticmethod

@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
 
+from src.core.config import settings
 from src.core.i18n import translate
 from src.core.protocols import ManagedPlugin
 from src.services.agent import (
@@ -1465,6 +1467,7 @@ class _StubLangfuseRun:
         self.trace_id: str | None = "stub-trace"
         self._langfuse = None
         self.finish_calls: list[dict[str, Any]] = []
+        self.metadata_updates: list[dict[str, Any]] = []
 
     @property
     def finished(self) -> bool:
@@ -1481,6 +1484,9 @@ class _StubLangfuseRun:
         self.finish_calls.append(
             {"output": output, "level": level, "status_message": status_message}
         )
+
+    def update_metadata(self, metadata: dict[str, Any]) -> None:
+        self.metadata_updates.append(metadata)
 
 
 @pytest.mark.asyncio
@@ -1534,6 +1540,87 @@ async def test_streaming_complete_does_not_overwrite_trace_with_cancelled() -> N
     assert len(stub_run.finish_calls) == 1
     assert stub_run.finish_calls[0]["level"] is None
     assert stub_run.finish_calls[0]["status_message"] is None
+
+
+@pytest.mark.asyncio
+async def test_agent_records_conversation_replay_diagnostics_in_langfuse_metadata() -> None:
+    plugin_instance = MockPlugin()
+    provider = MockLLMProvider([
+        {"content": "ok", "tool_calls": None},
+    ])
+    service = AgentService(plugin_instance, provider)
+
+    stub_run = _StubLangfuseRun()
+    service._start_langfuse_run = lambda *args, **kwargs: stub_run
+
+    history = [
+        {"role": "user", "content": "previous question"},
+        {
+            "role": "assistant",
+            "content": "previous answer",
+            "toolResults": [
+                {
+                    "tool": "test_query",
+                    "tool_name": "test_query",
+                    "tool_call_id": "call_prev",
+                    "arguments": {"sql_query": "SELECT 1"},
+                    "result": {"success": True, "result": [{"count": 1}], "error": None},
+                }
+            ],
+        },
+    ]
+
+    await collect_events(service.run("next question", conversation_history=history))
+
+    assert stub_run.metadata_updates
+    replay = stub_run.metadata_updates[0]["conversation_replay"]
+    assert replay["turns_replayed"] == 1
+    assert replay["mode_counts"] == {"full": 1}
+    assert replay["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_agent_logs_warning_for_text_only_replay(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(settings, "CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET", 30)
+    monkeypatch.setattr(settings, "CONVERSATION_DEGRADED_MAX_ROWS", 2)
+    caplog.set_level(logging.WARNING, logger="src.services.agent")
+
+    plugin_instance = MockPlugin()
+    provider = MockLLMProvider([
+        {"content": "ok", "tool_calls": None},
+    ])
+    service = AgentService(plugin_instance, provider)
+
+    stub_run = _StubLangfuseRun()
+    service._start_langfuse_run = lambda *args, **kwargs: stub_run
+
+    big_rows = [{"id": i, "label": "x" * 100} for i in range(100)]
+    history = [
+        {"role": "user", "content": "q"},
+        {
+            "role": "assistant",
+            "content": "answer",
+            "toolResults": [
+                {
+                    "tool": "test_query",
+                    "tool_name": "test_query",
+                    "tool_call_id": "call_prev",
+                    "arguments": {"sql_query": "SELECT 1"},
+                    "result": {"success": True, "result": big_rows, "error": None},
+                }
+            ],
+        },
+    ]
+
+    await collect_events(service.run("next question", conversation_history=history))
+
+    replay = stub_run.metadata_updates[0]["conversation_replay"]
+    assert replay["mode_counts"] == {"text_only": 1}
+    assert any(
+        record.levelno == logging.WARNING
+        and "Conversation tool replay truncated" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

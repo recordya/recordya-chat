@@ -503,6 +503,10 @@ async def test_conversation_builder_replays_tool_history_full():
 
     assert messages[4] == {"role": "assistant", "content": "Here are the items."}
     assert messages[-1] == {"role": "user", "content": "And the next ones?"}
+    diagnostics = builder.last_replay_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.mode_counts == {"full": 1}
+    assert diagnostics.truncated is False
 
 
 @pytest.mark.asyncio
@@ -626,6 +630,60 @@ async def test_conversation_builder_tool_replay_degrades_when_budget_tight(monke
     assert payload["_truncated"] is True
     assert payload["_original_row_count"] == 50
     assert len(payload["result"]) == 2
+    diagnostics = builder.last_replay_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.mode_counts == {"degraded": 1}
+    assert diagnostics.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_conversation_builder_tool_replay_degrades_entries_when_budget_tight(
+    monkeypatch,
+):
+    """When entries are too large for full mode, degraded replay truncates them."""
+    monkeypatch.setattr(settings, "CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET", 500)
+    monkeypatch.setattr(settings, "CONVERSATION_DEGRADED_MAX_ROWS", 2)
+
+    entries = [{"title": f"Doc {i}", "snippet": "x" * 100} for i in range(30)]
+    plugin = DummyPlugin(context_config=None)
+    builder = ConversationBuilder(plugin)
+    messages = await builder.build_messages(
+        question="next",
+        conversation_history=[
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": "done",
+                "toolResults": [
+                    {
+                        "tool": "document_search",
+                        "tool_name": "document_search",
+                        "tool_call_id": "call_docs",
+                        "arguments": {"query": "docs"},
+                        "result": {
+                            "success": True,
+                            "result": [],
+                            "entries": entries,
+                            "error": None,
+                        },
+                    }
+                ],
+            },
+        ],
+    )
+
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    payload = json.loads(tool_msg["content"])
+    assert payload["result"] == []
+    assert len(payload["entries"]) == 2
+    assert payload["_truncated"] is True
+    assert payload["_entries_truncated"] is True
+    assert payload["_original_entries_count"] == 30
+    assert payload["_retained_entries_count"] == 2
+    diagnostics = builder.last_replay_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.mode_counts == {"degraded": 1}
+    assert diagnostics.truncated is True
 
 
 @pytest.mark.asyncio
@@ -661,6 +719,11 @@ async def test_conversation_builder_tool_replay_falls_back_to_text_when_very_tig
     contents = [m.get("content") for m in assistant_msgs]
     assert "old answer" in contents
     assert "recent answer" in contents
+    diagnostics = builder.last_replay_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.mode_counts == {"text_only": 2}
+    assert diagnostics.over_budget_turns > 0
+    assert diagnostics.truncated is True
 
 
 @pytest.mark.asyncio
@@ -769,6 +832,21 @@ def test_conversation_builder_degrade_result_truncates_long_lists(monkeypatch):
     assert len(out["result"]) == 3
     assert out["_truncated"] is True
     assert out["_original_row_count"] == 50
+    assert out["_retained_row_count"] == 3
+
+
+def test_conversation_builder_degrade_result_truncates_entries(monkeypatch):
+    monkeypatch.setattr(settings, "CONVERSATION_DEGRADED_MAX_ROWS", 3)
+    entries = [{"title": f"Doc {i}"} for i in range(10)]
+    out = ConversationBuilder._degrade_result(
+        {"success": True, "result": [], "entries": entries, "error": None}
+    )
+    assert len(out["entries"]) == 3
+    assert out["result"] == []
+    assert out["_truncated"] is True
+    assert out["_entries_truncated"] is True
+    assert out["_original_entries_count"] == 10
+    assert out["_retained_entries_count"] == 3
 
 
 def test_conversation_builder_degrade_result_handles_non_dict():
