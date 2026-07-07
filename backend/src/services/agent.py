@@ -36,6 +36,7 @@ from src.plugin_sdk.sql import BaseSQLPlugin
 from src.services.agent_helpers import (
     CompositeToolProvider,
     ConversationBuilder,
+    ConversationReplayDiagnostics,
     ToolExecutionService,
 )
 from src.services.factory import get_engine
@@ -350,6 +351,11 @@ class AgentService:
         # Build initial messages via shared builder
         builder = ConversationBuilder(plugin)
         messages = await builder.build_messages(question, conversation_history)
+        self._record_replay_diagnostics(
+            lf_run,
+            plugin,
+            builder.last_replay_diagnostics,
+        )
 
         # Get tools from plugin merged with opted-in global tools
         tool_provider = CompositeToolProvider(plugin, get_global_tool_registry())
@@ -574,6 +580,32 @@ class AgentService:
         # Fallback to default hints
         return DEFAULT_STATUS_HINTS.get(tool_name, translate("agent.status.default"))
 
+    @staticmethod
+    def _record_replay_diagnostics(
+        lf_run: "_LangfuseRun",
+        plugin: BasePlugin,
+        diagnostics: ConversationReplayDiagnostics | None,
+    ) -> None:
+        """Attach conversation replay diagnostics to Langfuse and log truncation."""
+        if not diagnostics:
+            return
+
+        lf_run.update_metadata({"conversation_replay": diagnostics.to_dict()})
+        if not diagnostics.degraded_count and not diagnostics.text_only_count:
+            return
+
+        log_level = logging.WARNING if diagnostics.text_only_count else logging.INFO
+        logger.log(
+            log_level,
+            "Conversation tool replay truncated: plugin=%s turns=%s modes=%s "
+            "budget=%s remaining=%s",
+            plugin.name,
+            diagnostics.turns_replayed,
+            diagnostics.mode_counts,
+            diagnostics.budget_initial,
+            diagnostics.budget_remaining,
+        )
+
     async def _stream_llm(
         self,
         messages: list[dict[str, Any]],
@@ -672,6 +704,7 @@ class _LangfuseRun:
         self._langfuse = get_langfuse()
         self._stack = ExitStack()
         self._finished = False
+        self._metadata: dict[str, Any] = {}
 
         if not self._langfuse:
             return
@@ -687,6 +720,7 @@ class _LangfuseRun:
                 "environment": settings.ENV,
                 **({"prompt_hash": prompt_hash} if prompt_hash else {}),
             }
+            self._metadata = dict(metadata)
             obs_ctx = self._langfuse.start_as_current_observation(
                 as_type="span",
                 name="agent_run",
@@ -707,6 +741,18 @@ class _LangfuseRun:
     @property
     def finished(self) -> bool:
         return self._finished
+
+    def update_metadata(self, metadata: dict[str, Any]) -> None:
+        """Merge metadata into the active Langfuse span without replacing existing keys."""
+        if not metadata:
+            return
+        self._metadata.update(metadata)
+        if not self.span:
+            return
+        try:
+            self.span.update(metadata=self._metadata)
+        except Exception as exc:
+            logger.warning("Failed to update Langfuse metadata: %s", exc)
 
     def finish(
         self,

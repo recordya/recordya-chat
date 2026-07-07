@@ -108,6 +108,64 @@ def test_langfuse_run_keeps_environment_in_metadata(monkeypatch) -> None:
     assert captured_observation["metadata"]["environment"] == "production"
 
 
+def test_langfuse_run_update_metadata_merges_existing_metadata(monkeypatch) -> None:
+    agent_module = importlib.import_module("src.services.agent")
+
+    captured_updates: list[dict[str, Any]] = []
+
+    class FakeSpan:
+        id = "span-test"
+        trace_id = "trace-test"
+
+        def update(self, **kwargs: Any) -> None:
+            captured_updates.append(kwargs)
+
+        def end(self) -> None:
+            return None
+
+    class FakeObservationContext:
+        def __enter__(self) -> FakeSpan:
+            return FakeSpan()
+
+        def __exit__(self, *args: Any) -> None:
+            return None
+
+    class FakeLangfuse:
+        def start_as_current_observation(self, **kwargs: Any) -> FakeObservationContext:
+            return FakeObservationContext()
+
+        def flush(self) -> None:
+            return None
+
+    class FakePlugin:
+        name = "test_plugin"
+        source_type = "sql"
+
+    monkeypatch.setattr(agent_module, "get_langfuse", lambda: FakeLangfuse())
+    monkeypatch.setattr(agent_module, "propagate_attributes", lambda **kwargs: nullcontext())
+    monkeypatch.setattr(agent_module, "settings", Settings(ENV="production"))
+
+    langfuse_run = agent_module._LangfuseRun(
+        FakePlugin(),
+        "gpt-test",
+        "Question?",
+        user_id="user-test",
+        session_id="session-test",
+    )
+
+    replay_metadata = {"truncated": True, "mode_counts": {"text_only": 1}}
+    langfuse_run.update_metadata({"conversation_replay": replay_metadata})
+    langfuse_run.finish()
+
+    assert captured_updates[0]["metadata"] == {
+        "requested_model": "gpt-test",
+        "plugin": "test_plugin",
+        "source_type": "sql",
+        "environment": "production",
+        "conversation_replay": replay_metadata,
+    }
+
+
 def test_score_user_feedback_maps_rating_to_numeric_value(monkeypatch) -> None:
     from src.core import langfuse as langfuse_module
 

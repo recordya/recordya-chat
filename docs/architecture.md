@@ -454,10 +454,15 @@ Persistence: every assistant turn that ran tools is saved to `chat_messages.tool
 `ConversationBuilder._build_tool_replay()` then:
 
 1. Groups history into `(user, assistant)` turn pairs, keeping the last `CONVERSATION_MAX_TURNS` turns.
-2. Pre-serializes each turn in three modes — `full`, `degraded` (each tool result row-list capped at `CONVERSATION_DEGRADED_MAX_ROWS`, with `_truncated`/`_original_row_count` markers added), and `text_only` (final assistant text only, no tool messages).
+2. Pre-serializes each turn in three modes:
+   - `full` — complete synthesized `assistant.tool_calls` and matching `tool` messages.
+   - `degraded` — same native tool-call shape, but large list fields in each tool result are capped at `CONVERSATION_DEGRADED_MAX_ROWS`. Core truncates common payload shapes: `result` and `entries`. Truncated payloads include markers such as `_truncated`, `_result_truncated`, `_entries_truncated`, `_original_row_count`, `_original_entries_count`, `_retained_row_count`, and `_retained_entries_count`.
+   - `text_only` — only the final assistant text from that turn is replayed; synthesized `assistant.tool_calls` and `tool` messages are omitted.
 3. Greedily walks turns newest-first, picking the richest mode that still fits the global `CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET` (estimated at ~4 chars/token). Older turns degrade first; the most recent turn is always at least `text_only`.
 
 The reconstructed sequence is appended to the system prompt before the current user question. No `[CONTEXT:]` block is emitted on this path.
+
+Replay diagnostics are recorded outside the prompt: `AgentService` attaches a `conversation_replay` object to Langfuse metadata and logs truncation without tool arguments or result payloads. `degraded` replay is logged at `INFO`; `text_only` replay is logged at `WARNING`. The metadata includes aggregate fields such as `mode_counts`, `selected_modes`, `truncated`, `budget_initial`, `budget_remaining`, and `over_budget_turns`, plus per-turn token estimates.
 
 #### Legacy `[CONTEXT:]` Block
 
