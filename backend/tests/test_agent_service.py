@@ -17,6 +17,7 @@ from src.services.agent import (
     AgentService,
     _friendly_error_message,
     _has_renderable_results,
+    _is_retryable_error,
 )
 
 _NESTED_WIDGET_JSON = (
@@ -1107,10 +1108,32 @@ class TestFriendlyErrorMessage:
         result = _friendly_error_message(raw)
         assert result == translate("agent.error.rate_limit")
 
-    def test_server_error(self):
-        raw = "OpenAI API error: server_error"
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "OpenAI API error: server_error",
+            "OpenAI API error: Error code: 502 - Bad Gateway",
+            "OpenAI API error: Error code: 503 - Service Unavailable",
+            "OpenAI API error: provider overloaded",
+            "OpenAI API error: Connection error.",
+        ],
+    )
+    def test_model_unavailable(self, raw):
         result = _friendly_error_message(raw)
         assert result == translate("agent.error.server_error")
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "OpenAI API error: server_error",
+            "OpenAI API error: Error code: 502 - Bad Gateway",
+            "OpenAI API error: Error code: 503 - Service Unavailable",
+            "OpenAI API error: provider overloaded",
+            "OpenAI API error: Connection error.",
+        ],
+    )
+    def test_model_unavailable_is_retryable(self, raw):
+        assert _is_retryable_error(RuntimeError(raw)) is True
 
     def test_timeout(self):
         raw = "OpenAI API error: Request timeout"
@@ -1127,6 +1150,39 @@ class TestFriendlyErrorMessage:
         result = _friendly_error_message(raw)
         assert result == translate("agent.error.json_body")
 
+
+@pytest.mark.asyncio
+async def test_model_unavailable_after_retry_emits_friendly_error(plugin, monkeypatch):
+    from src.core.exceptions import LLMError
+
+    class UnavailableLLM:
+        name = "unavailable_llm"
+        supports_tools = True
+        supports_streaming = False
+
+        def __init__(self):
+            self.call_count = 0
+
+        async def complete(self, **kwargs):
+            del kwargs
+            self.call_count += 1
+            raise LLMError("OpenAI API error: Error code: 503 - Service Unavailable")
+
+        async def health_check(self):
+            return False
+
+    monkeypatch.setattr("src.services.agent._AUTO_RETRY_DELAY_SECONDS", 0)
+    llm = UnavailableLLM()
+    service = AgentService(plugin, llm)
+
+    events = await collect_events(service.run("Question"))
+
+    assert llm.call_count == 2
+    assert not [event for event in events if event["type"] == "complete"]
+    error_events = [event for event in events if event["type"] == "error"]
+    assert len(error_events) == 1
+    assert error_events[0]["data"]["message"] == translate("agent.error.server_error")
+    assert "503" not in error_events[0]["data"]["message"]
 
 
 # ================= Streaming (_stream_llm / run) Tests =================
