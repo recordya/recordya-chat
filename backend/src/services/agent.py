@@ -49,6 +49,18 @@ MAX_ITERATIONS = settings.MAX_ITERATIONS  # Safety limit for agentic loop (confi
 TOOL_TIMEOUT = 30  # Timeout for single tool execution (seconds)
 _FALLBACK_CONTENT = translate("agent.fallback_content")
 
+# Substrings that indicate the upstream model is temporarily unavailable.
+# Keep this as the single source for both retry and user-facing classification.
+_MODEL_UNAVAILABLE_PATTERNS: tuple[str, ...] = (
+    "server_error",
+    "502",
+    "503",
+    "bad gateway",
+    "service unavailable",
+    "overloaded",
+    "connection error",
+)
+
 # User-friendly error messages for known LLM/API error patterns.
 # Each entry is (substring_to_match, message_key); the message is localized
 # via translate() using the configured locale.
@@ -56,18 +68,14 @@ _FRIENDLY_ERROR_KEYS: list[tuple[str, str]] = [
     ("could not parse the json body", "agent.error.json_body"),
     ("context_length_exceeded", "agent.error.context_length"),
     ("rate_limit", "agent.error.rate_limit"),
-    ("server_error", "agent.error.server_error"),
     ("timeout", "agent.error.timeout"),
 ]
 
 # Substrings that indicate a transient / retryable LLM error.
 _RETRYABLE_PATTERNS: list[str] = [
     "could not parse the json body",
-    "server_error",
     "timeout",
-    "502",
-    "503",
-    "overloaded",
+    *_MODEL_UNAVAILABLE_PATTERNS,
 ]
 
 _AUTO_RETRY_DELAY_SECONDS = 1.0
@@ -79,6 +87,8 @@ def _friendly_error_message(raw: str) -> str:
     for pattern, key in _FRIENDLY_ERROR_KEYS:
         if pattern in lower:
             return translate(key)
+    if any(pattern in lower for pattern in _MODEL_UNAVAILABLE_PATTERNS):
+        return translate("agent.error.server_error")
     return translate("agent.error.generic")
 
 
@@ -86,6 +96,7 @@ def _is_retryable_error(error: Exception) -> bool:
     """Return True if the error looks transient and worth one automatic retry."""
     lower = str(error).lower()
     return any(pattern in lower for pattern in _RETRYABLE_PATTERNS)
+
 
 # Default status hints for tools without explicit status_hint
 # Plugin tools can override by setting status_hint in their definition
