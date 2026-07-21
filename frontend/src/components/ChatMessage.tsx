@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { useTranslation } from "react-i18next";
-import { User, RotateCcw } from "lucide-react";
+import { User, RotateCcw, FileText } from "lucide-react";
 import { parseSelectFieldMeta } from "@/utils/sqlParser";
 import { MessageContent } from "./MessageContent";
 import { ReasoningPanel } from "./ReasoningPanel";
@@ -17,16 +17,12 @@ import {
   formatConfigRegistry,
   FormatConfigProvider,
 } from "@/plugins/registry";
-
-const WIDGET_MAKE_CHOICES_MARKER = "WIDGET_MAKE_CHOICES_ANSWERS";
-
-function getUserVisibleContent(content: string): string {
-  const markerIndex = content.indexOf(WIDGET_MAKE_CHOICES_MARKER);
-  if (markerIndex === -1) {
-    return content;
-  }
-  return content.slice(0, markerIndex).trimEnd();
-}
+import {
+  getUserVisibleContent,
+  parseComposerReferences,
+  segmentContentWithReferences,
+  type ComposerReference,
+} from "@/utils/composerReferences";
 
 export interface ToolResultRecord {
   tool: string;
@@ -57,6 +53,7 @@ interface ChatMessageProps {
   agentId?: string;
   onSubmitUserMessage?: (text: string) => void;
   onSetComposerText?: (text: string) => void;
+  onAddComposerReference?: (reference: ComposerReference) => void;
   chatId?: string | null;
   showFeedbackActions?: boolean;
   showRetryAction?: boolean;
@@ -70,6 +67,7 @@ export const ChatMessage = memo(function ChatMessage({
   agentId,
   onSubmitUserMessage,
   onSetComposerText,
+  onAddComposerReference,
   chatId,
   showFeedbackActions = false,
   showRetryAction = false,
@@ -82,10 +80,30 @@ export const ChatMessage = memo(function ChatMessage({
 
   if (isUser) {
     const visibleUserContent = getUserVisibleContent(message.content);
+    const userReferences = parseComposerReferences(message.content);
+    const segments = segmentContentWithReferences(
+      visibleUserContent,
+      userReferences,
+    );
     return (
       <div className="flex gap-3 justify-end">
         <div className="max-w-[85%] rounded-2xl px-4 py-3 bg-muted text-foreground">
-          <p className="text-sm whitespace-pre-wrap">{visibleUserContent}</p>
+          <p className="text-sm whitespace-pre-wrap">
+            {segments.map((segment, index) =>
+              segment.reference ? (
+                <span
+                  key={`${segment.text}-${index}`}
+                  className="inline-flex items-center gap-1 align-middle rounded-md border border-border bg-background/60 px-1.5 py-0.5 mx-0.5 text-xs text-foreground max-w-[16rem]"
+                  title={segment.reference.label}
+                >
+                  <FileText className="h-3 w-3 flex-shrink-0 text-muted-foreground" aria-hidden />
+                  <span className="truncate">{segment.reference.label}</span>
+                </span>
+              ) : (
+                <span key={index}>{segment.text}</span>
+              )
+            )}
+          </p>
         </div>
         <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
           <User className="h-4 w-4 text-muted-foreground" />
@@ -119,6 +137,7 @@ export const ChatMessage = memo(function ChatMessage({
         durationFields,
         submitUserMessage: onSubmitUserMessage,
         setComposerText: onSetComposerText,
+        addComposerReference: onAddComposerReference,
       })
     : null;
   const widgetDescriptor = hasResults
@@ -141,6 +160,7 @@ export const ChatMessage = memo(function ChatMessage({
             durationFields,
             submitUserMessage: onSubmitUserMessage,
             setComposerText: onSetComposerText,
+            addComposerReference: onAddComposerReference,
           },
           widgetDescriptor
         )
@@ -152,6 +172,7 @@ export const ChatMessage = memo(function ChatMessage({
     sourcePluginId,
     submitUserMessage: onSubmitUserMessage,
     setComposerText: onSetComposerText,
+    addComposerReference: onAddComposerReference,
   };
 
   return (
@@ -200,6 +221,7 @@ export const ChatMessage = memo(function ChatMessage({
                 durationFields,
                 submitUserMessage: onSubmitUserMessage,
                 setComposerText: onSetComposerText,
+                addComposerReference: onAddComposerReference,
               }}
             />
             )}

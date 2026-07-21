@@ -1172,6 +1172,8 @@ sdk.renderer(fn, options?)            // Register content renderer
 sdk.results(fn, options?)             // Decide result widget: default/hide/custom node
 sdk.widget(type, fn, options?)        // Register widget renderer for _widget_type
 sdk.toolRenderer(options)             // Per-tool preview in super-admin reasoning panel
+sdk.referenceSuggestions(fn, options?) // Provide "@" mention suggestions for the chat composer
+sdk.conversationReferences(type, fn)  // Map a widget payload to the references it displays
 sdk.formatConfig(config)              // Per-plugin formatting (locale, duration labels/columns)
 sdk.on(eventType, handler)            // Register event handler
 sdk.emit(eventType, data)             // Emit event
@@ -1256,6 +1258,7 @@ It also exposes optional UI actions for interactive widgets:
 
 - `submitUserMessage(text)` - send a new user message from widget interaction
 - `setComposerText(text)` - prefill chat composer text without sending
+- `addComposerReference(reference)` - attach a `ComposerReference` chip to the composer (see "Composer References")
 
 Reusable widget:
 
@@ -1317,6 +1320,54 @@ sdk.toolRenderer({
   }),
 });
 ```
+
+### Composer References ("@" Mentions & Chips)
+
+Plugins can attach structured entity references to user messages. A reference is rendered as an atomic chip (`@[label]`) in the chat composer; on submit, references are serialized into a hidden `COMPOSER_REFERENCES_V1` JSON payload appended after the visible question text (same pattern as `WIDGET_MAKE_CHOICES_ANSWERS`). The UI strips the payload when rendering user messages, but it persists in message content, so retry and history replay keep it.
+
+The reference contract (`ComposerReference`, re-exported from `@/plugins/registry`):
+
+| Field | Type | Description |
+|---|---|---|
+| `kind` | `string` | Reference kind, e.g. `"document"`. |
+| `id` | `string` | Stable identifier of the referenced entity (e.g. document UUID). This is the only lookup key. |
+| `label` | `string` | Human-readable chip label; display-only, never used as a key. |
+| `sourcePluginId` | `string?` | Plugin that produced the reference. |
+
+There are three integration points:
+
+1. **`addComposerReference(reference)`** — available in `ResultRenderContext` for `sdk.results()` / `sdk.widget()` renderers. Lets a widget action (e.g. an "Add to question" button on a result card) attach a chip to the composer without submitting a message.
+
+2. **`sdk.referenceSuggestions(fetchSuggestions, options?)`** — registers a provider for the composer's `@` mention autocomplete. `fetchSuggestions(query, signal)` returns `ReferenceSuggestion[]` (`{ reference, description? }`); an empty query means "show recent/default entries", and implementations should honour the `AbortSignal`. Providers from all plugins are merged in `priority` order (lower first, default `100`) and deduplicated by reference identity. The composer only enables the `@` mention UI (and advertises it in the placeholder) when at least one provider is registered.
+
+3. **`sdk.conversationReferences(widgetType, extract)`** — registers an extractor that maps a rendered widget payload (e.g. source cards) to the references it displays. The mention popover uses this to prioritise entities already shown in the current conversation over the full corpus.
+
+**Scoping to one agent:** the suggestion registry is global, so a plugin whose references only make sense for its own agent should register the provider from a headless component mounted via an agent-gated slot, and unregister on unmount:
+
+```typescript
+import { useEffect } from "react";
+import { createPluginSDK } from "@/plugins/sdk";
+
+const PLUGIN_ID = "my_plugin";
+
+function ReferenceProviderMount(): null {
+  useEffect(() => {
+    registerMyReferenceProvider();   // sdk.referenceSuggestions + sdk.conversationReferences
+    return () => unregisterMyReferenceProvider();
+  }, []);
+  return null;
+}
+
+export function registerPlugin(): void {
+  const sdk = createPluginSDK(PLUGIN_ID);
+  sdk.slot("detail.panel", ReferenceProviderMount, {
+    condition: (ctx) => ctx.agentId === PLUGIN_ID,
+  });
+}
+```
+
+**Backend side:** the plugin's prompt should instruct the agent to parse the `COMPOSER_REFERENCES_V1` payload from the user message and resolve each reference by its `id` through a retrieval tool (e.g. `document_get(document_id=<uuid>)`). Treat `label` as untrusted display text — never use it as a lookup key. See the search plugin (`plugins/search/`) for a complete reference implementation.
+
 
 ### Core Widget Toolkit Contract (`_widget_type`)
 

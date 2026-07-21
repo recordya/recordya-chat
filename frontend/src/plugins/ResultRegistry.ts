@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { ComposerReference } from "@/utils/composerReferences";
 
 export type ResultRendererAction = "default" | "hide" | "render";
 
@@ -14,6 +15,7 @@ export interface ResultRenderContext {
   durationFields: string[];
   submitUserMessage?: (text: string) => void;
   setComposerText?: (text: string) => void;
+  addComposerReference?: (reference: ComposerReference) => void;
 }
 
 export interface ResultRenderDecision {
