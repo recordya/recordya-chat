@@ -1,6 +1,7 @@
-import { useRef, useEffect, useState, useCallback } from "react";
+import { useRef, useEffect, useState, useCallback, useMemo, useSyncExternalStore } from "react";
 import { useTranslation } from "react-i18next";
-import { ArrowUp, ArrowDown, Plus, Loader2, TrendingUp, BarChart, Mic, Sparkles, PanelLeft, Square } from "lucide-react";
+import { ArrowUp, ArrowDown, Plus, Loader2, TrendingUp, BarChart, Mic, Sparkles, PanelLeft, Square, FileText } from "lucide-react";
+import { useComposerMention } from "@/hooks/useComposerMention";
 import { ChatMessage, Message, ToolResultRecord } from "./ChatMessage";
 import { ReasoningPanel } from "./ReasoningPanel";
 import { Slot } from "./Slot";
@@ -18,6 +19,19 @@ import { shouldUpdateMessages, shouldShowProcessing, computeRetryAction } from "
 import { mergeMessage, removeMessage, upsertMessage } from "@/utils/streamingMessages";
 import { isScrolledToBottom } from "@/utils/scroll";
 import { deleteLastMessages, type ChatMessageFeedbackResponse, type DataSourceInfo } from "@/lib/api";
+import {
+  referenceSuggestionRegistry,
+  extractWidgetDescriptor,
+} from "@/plugins/registry";
+import {
+  addReference,
+  referenceKey,
+  appendReferenceToken,
+  filterReferencesInText,
+  composeQuestionWithReferences,
+  type ComposerReference,
+} from "@/utils/composerReferences";
+import { ComposerInput } from "./ComposerInput";
 
 // Match backend validation constraint
 const QUESTION_MAX_LENGTH = 4000;
@@ -96,6 +110,9 @@ export function ChatInterface({
   // Track which chat ID has an in-flight request so the loading spinner
   // is only shown when the user is viewing that specific chat.
   const [processingChatId, setProcessingChatId] = useState<string | null>(null);
+  // Structured references ("chips") attached to the next user message,
+  // independent of the typed text. Serialized into the question on submit.
+  const [composerReferences, setComposerReferences] = useState<ComposerReference[]>([]);
   const [streamingAssistantMessageId, setStreamingAssistantMessageId] = useState<string | null>(null);
   const streamingAssistantMessageIdRef = useRef<string | null>(null);
   const showProcessingIndicator = shouldShowProcessing(isProcessing, processingChatId, currentChatId);
@@ -174,6 +191,8 @@ export function ChatInterface({
       clearComposer = false,
       /** When true the user message already exists in UI + DB (retry flow). */
       skipUserMessage = false,
+      /** Structured references serialized into the message on submit. */
+      references: ComposerReference[] = [],
     ): Promise<void> => {
       const trimmedQuestion = question.trim();
       if (!trimmedQuestion || isProcessing || roleLoading) {
@@ -192,7 +211,7 @@ export function ChatInterface({
       const userMessage: Message = {
         id: Date.now().toString(),
         role: "user",
-        content: trimmedQuestion,
+        content: composeQuestionWithReferences(trimmedQuestion, references),
       };
       const sourcePluginId = selectedAgent ?? undefined;
 
@@ -201,6 +220,7 @@ export function ChatInterface({
       }
       if (clearComposer) {
         setInput("");
+        setComposerReferences([]);
       }
       setIsProcessing(true);
       const assistantMessageId = `${Date.now() + 1}-assistant`;
@@ -231,9 +251,9 @@ export function ChatInterface({
           await onSaveMessage(chatId, userMessage);
         }
 
-        // Update title with first message
+        // Update title with first message (visible text only, no machine payload)
         if (isFirstMessage) {
-          await onUpdateTitle(chatId, userMessage.content);
+          await onUpdateTitle(chatId, trimmedQuestion);
         }
 
         // Helper: check if the user is still viewing the chat that started this request.
@@ -441,6 +461,69 @@ export function ChatInterface({
     [setInput],
   );
 
+  // Registers the reference without touching the text — the mention flow
+  // inserts its own inline token at the caret position.
+  const registerComposerReference = useCallback(
+    (reference: ComposerReference) => {
+      setComposerReferences((prev) => addReference(prev, reference));
+    },
+    [],
+  );
+
+  // Used outside the mention flow (e.g. source card button): registers the
+  // reference and appends its inline token to the composer text.
+  const handleAddComposerReference = useCallback(
+    (reference: ComposerReference) => {
+      setComposerReferences((prev) => addReference(prev, reference));
+      setInput(appendReferenceToken(input, reference));
+    },
+    [input, setInput],
+  );
+
+  // References already rendered in the conversation (e.g. on source cards),
+  // newest first — surfaced as the first group of "@" mention suggestions.
+  const conversationReferences = useMemo(() => {
+    const seen = new Set<string>();
+    const references: ComposerReference[] = [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (!Array.isArray(message.queryResults) || message.queryResults.length === 0) {
+        continue;
+      }
+      const descriptor = extractWidgetDescriptor(message.queryResults);
+      if (!descriptor) {
+        continue;
+      }
+      const extracted = referenceSuggestionRegistry.extractConversationReferences(
+        descriptor.widgetType,
+        descriptor.payload,
+      );
+      for (const reference of extracted) {
+        const key = referenceKey(reference);
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        references.push(reference);
+      }
+    }
+    return references;
+  }, [messages]);
+
+  const composerMention = useComposerMention({
+    input,
+    setInput,
+    addReference: registerComposerReference,
+    conversationReferences,
+  });
+
+  // Reacts to headless provider mounts, so the placeholder only advertises
+  // the "@" mention when the current agent actually supports it.
+  const hasMentionProviders = useSyncExternalStore(
+    referenceSuggestionRegistry.subscribe,
+    () => referenceSuggestionRegistry.hasProviders(),
+  );
+
   const handleRetry = useCallback(
     (errorMessageId: string) => {
       const action = computeRetryAction(messages, errorMessageId);
@@ -476,7 +559,14 @@ export function ChatInterface({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    await submitUserMessage(input, true);
+    // Only references whose inline token survived in the text are attached —
+    // deleting "@[label]" from the composer detaches the reference.
+    await submitUserMessage(
+      input,
+      true,
+      false,
+      filterReferencesInText(input, composerReferences),
+    );
   };
 
   const chatSlotContext = {
@@ -486,6 +576,7 @@ export function ChatInterface({
     isProcessing,
     setComposerText: setInput,
     submitUserMessage: handleSubmitFromMessage,
+    addComposerReference: handleAddComposerReference,
   };
 
   return (
@@ -562,6 +653,7 @@ export function ChatInterface({
                   agentId={selectedAgent ?? undefined}
                   onSubmitUserMessage={handleSubmitFromMessage}
                   onSetComposerText={handleSetComposerText}
+                  onAddComposerReference={handleAddComposerReference}
                   chatId={currentChatId}
                   showFeedbackActions={showFeedbackActions}
                   showRetryAction={showRetryAction}
@@ -619,59 +711,124 @@ export function ChatInterface({
 
           <form onSubmit={handleSubmit} className="pb-3 pt-2">
             <Slot name="chat.input.before" context={chatSlotContext} />
-            <div className="relative flex items-center gap-2 border border-border rounded-full bg-muted/30 shadow-sm focus-within:border-muted-foreground/50 focus-within:shadow-md transition-all pl-3 pr-2 py-1.5">
-              {/* Plus icon */}
-              <button
-                type="button"
-                className="flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors"
-                aria-label={t("chat:add")}
-              >
-                <Plus className="h-5 w-5" />
-              </button>
-
-              {/* Input */}
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder={t("chat:inputPlaceholder")}
-                rows={1}
-                maxLength={QUESTION_MAX_LENGTH}
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                data-form-type="other"
-                data-lpignore="true"
-                className="flex-1 bg-transparent resize-none outline-none text-sm h-8 overflow-y-auto py-1.5 placeholder:text-muted-foreground/60"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSubmit(e);
-                  }
-                }}
-                disabled={isProcessing}
-              />
-
-              {/* Submit / stop button — stop only shows for the chat that owns the in-flight request */}
-              {isStreaming && processingChatId !== null && processingChatId === currentChatId ? (
+            <div className="relative rounded-full border border-border bg-muted/30 shadow-sm focus-within:border-muted-foreground/50 focus-within:shadow-md transition-all pl-3 pr-2 py-1.5">
+              {composerMention.mention && (
+                <div
+                  className="absolute bottom-full left-0 right-0 mb-2 rounded-xl border border-border bg-background shadow-lg overflow-hidden z-20"
+                  role="listbox"
+                  aria-label={t("chat:mentionSuggestionsLabel")}
+                >
+                  {composerMention.isLoading ? (
+                    <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                      {t("chat:mentionLoading")}
+                    </div>
+                  ) : composerMention.suggestions.length === 0 ? (
+                    <div className="px-3 py-2.5 text-xs text-muted-foreground">
+                      {t("chat:mentionNoResults")}
+                    </div>
+                  ) : (
+                    <ul className="max-h-64 overflow-y-auto py-1">
+                      {composerMention.suggestions.map((suggestion, index) => (
+                        <li
+                          key={referenceKey(suggestion.reference)}
+                          role="option"
+                          aria-selected={index === composerMention.activeIndex}
+                        >
+                          {index === 0 && composerMention.conversationCount > 0 && (
+                            <div className="px-3 pt-1.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                              {t("chat:mentionGroupConversation")}
+                            </div>
+                          )}
+                          {index === composerMention.conversationCount &&
+                            composerMention.conversationCount > 0 && (
+                            <div className="mt-1 border-t border-border px-3 pt-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                              {t("chat:mentionGroupAll")}
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => composerMention.pick(suggestion)}
+                            onMouseEnter={() => composerMention.setActiveIndex(index)}
+                            className={cn(
+                              "w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors",
+                              index === composerMention.activeIndex
+                                ? "bg-muted text-foreground"
+                                : "text-foreground hover:bg-muted/60"
+                            )}
+                          >
+                            <FileText className="h-4 w-4 flex-shrink-0 text-muted-foreground" aria-hidden />
+                            <span className="truncate">{suggestion.reference.label}</span>
+                            {suggestion.description && (
+                              <span className="ml-auto flex-shrink-0 text-xs text-muted-foreground truncate max-w-[10rem]">
+                                {suggestion.description}
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                {/* Plus icon */}
                 <button
                   type="button"
-                  onClick={abortStream}
-                  aria-label={t("chat:stop")}
-                  className="flex-shrink-0 h-8 w-8 rounded-full bg-foreground text-background flex items-center justify-center hover:opacity-80 transition-opacity"
+                  className="flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center text-muted-foreground hover:bg-muted transition-colors"
+                  aria-label={t("chat:add")}
                 >
-                  <Square className="h-3.5 w-3.5 fill-current" />
+                  <Plus className="h-5 w-5" />
                 </button>
-              ) : (
-                <button
-                  type="submit"
-                  disabled={!input.trim() || isProcessing}
-                  aria-label={t("chat:send")}
-                  className="flex-shrink-0 h-8 w-8 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-80 transition-opacity"
-                >
-                  <ArrowUp className="h-4 w-4" />
-                </button>
-              )}
+
+                {/* Input: contentEditable rendering reference tokens as chips.
+                    Backspace on a chip removes it whole (atomic element). */}
+                <ComposerInput
+                  value={input}
+                  references={composerReferences}
+                  onChange={setInput}
+                  onCaretUpdate={composerMention.updateFromPosition}
+                  onBlur={() => setTimeout(composerMention.close, 150)}
+                  placeholder={t(
+                    hasMentionProviders
+                      ? "chat:inputPlaceholderWithMention"
+                      : "chat:inputPlaceholder"
+                  )}
+                  maxLength={QUESTION_MAX_LENGTH}
+                  disabled={isProcessing}
+                  onKeyDown={(e) => {
+                    if (composerMention.handleKeyDown(e)) {
+                      e.preventDefault();
+                      return;
+                    }
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      handleSubmit(e);
+                    }
+                  }}
+                />
+
+                {/* Submit / stop button — stop only shows for the chat that owns the in-flight request */}
+                {isStreaming && processingChatId !== null && processingChatId === currentChatId ? (
+                  <button
+                    type="button"
+                    onClick={abortStream}
+                    aria-label={t("chat:stop")}
+                    className="flex-shrink-0 h-8 w-8 rounded-full bg-foreground text-background flex items-center justify-center hover:opacity-80 transition-opacity"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!input.trim() || isProcessing}
+                    aria-label={t("chat:send")}
+                    className="flex-shrink-0 h-8 w-8 rounded-full bg-foreground text-background flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed hover:opacity-80 transition-opacity"
+                  >
+                    <ArrowUp className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {getShowBranding() && (

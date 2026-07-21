@@ -16,6 +16,11 @@ import {
 } from "./ToolRendererRegistry";
 import { pluginEventBus, type PluginEventType, type PluginEvent } from "./EventBus";
 import { formatConfigRegistry, type PluginFormatConfig } from "./FormatConfig";
+import {
+  referenceSuggestionRegistry,
+  type ReferenceSuggestion,
+} from "./ReferenceSuggestionRegistry";
+import type { ComposerReference } from "@/utils/composerReferences";
 
 export interface SlotOptions {
   order?: number;
@@ -54,6 +59,10 @@ export interface ToolRendererOptions {
   condition?: (context: ToolRenderContext) => boolean;
 }
 
+export interface ReferenceSuggestionOptions {
+  priority?: number;
+}
+
 export type EventHandler<T = unknown> = (event: PluginEvent<T>) => ReactNode | null;
 
 export interface PluginSDK {
@@ -83,6 +92,14 @@ export interface PluginSDK {
     options?: WidgetRenderOptions
   ): void;
   toolRenderer(options: ToolRendererOptions): void;
+  referenceSuggestions(
+    fetchSuggestions: (query: string, signal: AbortSignal) => Promise<ReferenceSuggestion[]>,
+    options?: ReferenceSuggestionOptions
+  ): void;
+  conversationReferences(
+    widgetType: string,
+    extract: (payload: Record<string, unknown>) => ComposerReference[]
+  ): void;
   on<T = unknown>(eventType: PluginEventType, handler: EventHandler<T>): void;
   emit<T = unknown>(eventType: PluginEventType, data: T): ReactNode | null;
   formatConfig(config: PluginFormatConfig): void;
@@ -201,6 +218,28 @@ export function createPluginSDK(pluginId: string): PluginSDK {
       });
     },
 
+    referenceSuggestions(
+      fetchSuggestions: (query: string, signal: AbortSignal) => Promise<ReferenceSuggestion[]>,
+      options?: ReferenceSuggestionOptions
+    ): void {
+      referenceSuggestionRegistry.register({
+        pluginId,
+        priority: options?.priority ?? 100,
+        fetchSuggestions,
+      });
+    },
+
+    conversationReferences(
+      widgetType: string,
+      extract: (payload: Record<string, unknown>) => ComposerReference[]
+    ): void {
+      referenceSuggestionRegistry.registerExtractor({
+        pluginId,
+        widgetType,
+        extract,
+      });
+    },
+
     on<T = unknown>(eventType: PluginEventType, handler: EventHandler<T>): void {
       pluginEventBus.register(pluginId, eventType, handler);
       registeredEvents.push(eventType);
@@ -230,6 +269,7 @@ export function createPluginSDK(pluginId: string): PluginSDK {
       widgetRegistry.unregisterPlugin(pluginId);
       toolRendererRegistry.unregisterPlugin(pluginId);
       formatConfigRegistry.unregister(pluginId);
+      referenceSuggestionRegistry.unregister(pluginId);
 
       for (const eventType of registeredEvents) {
         pluginEventBus.unregister(pluginId, eventType);
@@ -252,4 +292,6 @@ export type {
 } from "./ToolRendererRegistry";
 export type { WidgetRenderDecision } from "./WidgetRegistry";
 export type { PluginFormatConfig, DurationLabels } from "./FormatConfig";
+export type { ReferenceSuggestion } from "./ReferenceSuggestionRegistry";
+export type { ComposerReference } from "@/utils/composerReferences";
 export { DefaultResultsTableWidget } from "./widgets/DefaultResultsTableWidget";

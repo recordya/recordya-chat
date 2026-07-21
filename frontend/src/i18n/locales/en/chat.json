@@ -8,6 +8,7 @@
   "scrollToBottom": "Scroll to bottom",
   "add": "Add",
   "inputPlaceholder": "Ask anything",
+  "inputPlaceholderWithMention": "Ask anything, @ for context",
   "stop": "Stop",
   "send": "Send",
   "retry": "Retry",
@@ -53,5 +54,12 @@
   "feedbackSavedTimeOver3Hours": "over 3h",
   "feedbackMissingMessageError": "Feedback cannot be saved for this message.",
   "feedbackSaveError": "Failed to save feedback.",
-  "feedbackGroupLabel": "Rate response"
+  "feedbackGroupLabel": "Rate response",
+  "referencesGroupLabel": "Attached documents",
+  "removeReference": "Remove reference: {{label}}",
+  "mentionSuggestionsLabel": "Document suggestions",
+  "mentionLoading": "Searching documents...",
+  "mentionNoResults": "No matching documents",
+  "mentionGroupConversation": "From this conversation",
+  "mentionGroupAll": "All documents"
 }

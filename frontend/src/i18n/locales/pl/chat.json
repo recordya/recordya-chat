@@ -8,6 +8,7 @@
   "scrollToBottom": "Przewiń na dół",
   "add": "Dodaj",
   "inputPlaceholder": "Zapytaj o cokolwiek",
+  "inputPlaceholderWithMention": "Zapytaj o cokolwiek, @ aby dodać kontekst",
   "stop": "Zatrzymaj",
   "send": "Wyślij",
   "retry": "Ponów",
@@ -53,5 +54,12 @@
   "feedbackSavedTimeOver3Hours": "powyżej 3h",
   "feedbackMissingMessageError": "Nie można zapisać oceny dla tej wiadomości.",
   "feedbackSaveError": "Nie udało się zapisać oceny.",
-  "feedbackGroupLabel": "Oceń odpowiedź"
+  "feedbackGroupLabel": "Oceń odpowiedź",
+  "referencesGroupLabel": "Załączone dokumenty",
+  "removeReference": "Usuń referencję: {{label}}",
+  "mentionSuggestionsLabel": "Sugestie dokumentów",
+  "mentionLoading": "Szukam dokumentów...",
+  "mentionNoResults": "Brak pasujących dokumentów",
+  "mentionGroupConversation": "Z tej rozmowy",
+  "mentionGroupAll": "Wszystkie dokumenty"
 }

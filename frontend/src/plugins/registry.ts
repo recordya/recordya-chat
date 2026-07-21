@@ -61,6 +61,14 @@ export type {
 export { viewRegistry } from "./ViewRegistry";
 export type { ViewConfig, ViewProps, NavItem } from "./ViewRegistry";
 
+// ReferenceSuggestionRegistry - composer "@" mention autocomplete providers
+export { referenceSuggestionRegistry } from "./ReferenceSuggestionRegistry";
+export type {
+  ReferenceSuggestion,
+  ReferenceSuggestionProvider,
+  ConversationReferenceExtractor,
+} from "./ReferenceSuggestionRegistry";
+
 // FormatConfig - per-plugin locale, duration labels, duration columns
 export {
   formatConfigRegistry,
