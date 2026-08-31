@@ -67,7 +67,7 @@ _MODEL_UNAVAILABLE_PATTERNS: tuple[str, ...] = (
 _FRIENDLY_ERROR_KEYS: list[tuple[str, str]] = [
     ("could not parse the json body", "agent.error.json_body"),
     ("context_length_exceeded", "agent.error.context_length"),
-    ("Please reduce the length of the input prompt", "agent.error.context_length"),
+    ("please reduce the length of the input prompt", "agent.error.context_length"),
     ("rate_limit", "agent.error.rate_limit"),
     ("timeout", "agent.error.timeout"),
 ]
