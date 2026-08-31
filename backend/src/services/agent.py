@@ -67,6 +67,7 @@ _MODEL_UNAVAILABLE_PATTERNS: tuple[str, ...] = (
 _FRIENDLY_ERROR_KEYS: list[tuple[str, str]] = [
     ("could not parse the json body", "agent.error.json_body"),
     ("context_length_exceeded", "agent.error.context_length"),
+    ("Please reduce the length of the input prompt", "agent.error.context_length"),
     ("rate_limit", "agent.error.rate_limit"),
     ("timeout", "agent.error.timeout"),
 ]
@@ -422,11 +423,7 @@ class AgentService:
                                 response = final_response
                         break
                     except Exception as llm_err:
-                        if (
-                            attempt == 0
-                            and not tokens_emitted
-                            and _is_retryable_error(llm_err)
-                        ):
+                        if attempt == 0 and not tokens_emitted and _is_retryable_error(llm_err):
                             logger.warning(
                                 "Retryable LLM error (auto-retry in %.1fs): %s",
                                 _AUTO_RETRY_DELAY_SECONDS,
@@ -469,18 +466,21 @@ class AgentService:
                         len(tool_history),
                         lf_run.trace_id,
                     )
-                    lf_run.finish(output={
-                        "content": final_content,
-                        "iterations": iterations,
-                        "tool_count": len(tool_history),
-                        "effective_model": effective_model,
-                        "request_overrides": request_overrides or None,
-                    })
+                    lf_run.finish(
+                        output={
+                            "content": final_content,
+                            "iterations": iterations,
+                            "tool_count": len(tool_history),
+                            "effective_model": effective_model,
+                            "request_overrides": request_overrides or None,
+                        }
+                    )
                     yield {
                         "type": "complete",
                         "data": self._build_result(
                             final_content,
-                            tool_history, iterations,
+                            tool_history,
+                            iterations,
                             langfuse_trace_id=lf_run.trace_id,
                         ),
                     }
@@ -497,9 +497,7 @@ class AgentService:
                 parsed_calls = tool_executor.parse_tool_calls(tool_calls)
                 for call in parsed_calls:
                     reasoning = call["arguments"].pop("reasoning", None)
-                    status_message = reasoning or self._get_status_hint(
-                        call["tool_name"], tools
-                    )
+                    status_message = reasoning or self._get_status_hint(call["tool_name"], tools)
                     yield {
                         "type": "status",
                         "data": {
@@ -577,9 +575,7 @@ class AgentService:
             if not lf_run.finished:
                 lf_run.finish(level="WARNING", status_message="cancelled")
 
-    def _get_status_hint(
-        self, tool_name: str, tools: list[dict[str, Any]]
-    ) -> str:
+    def _get_status_hint(self, tool_name: str, tools: list[dict[str, Any]]) -> str:
         """Get status hint for a tool from the provided definitions or defaults."""
         for tool in tools:
             func = tool.get("function", {})
@@ -692,7 +688,6 @@ class AgentService:
         yield {"type": "final", **response}
 
 
-
 class _LangfuseRun:
     """Encapsulates Langfuse trace lifecycle for a single agent run.
 
@@ -721,9 +716,7 @@ class _LangfuseRun:
             return
 
         try:
-            prompt_hash = (
-                plugin.get_prompt_hash() if isinstance(plugin, BaseSQLPlugin) else None
-            )
+            prompt_hash = plugin.get_prompt_hash() if isinstance(plugin, BaseSQLPlugin) else None
             metadata = {
                 "requested_model": model,
                 "plugin": plugin.name,
@@ -740,9 +733,7 @@ class _LangfuseRun:
             )
             self.span = self._stack.enter_context(obs_ctx)
             self.trace_id = self.span.trace_id
-            self._stack.enter_context(
-                propagate_attributes(user_id=user_id, session_id=session_id)
-            )
+            self._stack.enter_context(propagate_attributes(user_id=user_id, session_id=session_id))
             logger.info("Langfuse trace started: session=%s user=%s", session_id, user_id)
         except Exception as exc:
             logger.warning("Failed to create Langfuse trace: %s", exc)
