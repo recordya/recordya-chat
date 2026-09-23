@@ -427,9 +427,31 @@ class ConversationBuilder:
         assistant_content = assistant_msg.get("content") or ""
         tool_results = assistant_msg.get("toolResults") or []
 
-        if not tool_results or mode == "text_only":
+        if not tool_results:
             if assistant_content:
                 messages.append({"role": "assistant", "content": assistant_content})
+            return {"messages": messages, "tokens": cls._estimate_tokens(messages)}
+
+        if mode == "text_only":
+            # text_only normally keeps only the assistant's own text. If the
+            # assistant has no text but did call tools, silently dropping the
+            # turn makes the LLM lose context and can produce empty responses.
+            # Preserve a compact tool-call skeleton instead.
+            if assistant_content:
+                messages.append({"role": "assistant", "content": assistant_content})
+                return {"messages": messages, "tokens": cls._estimate_tokens(messages)}
+            for tr in tool_results:
+                tc = cls._synthesize_tool_calls([tr])[0]
+                messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [tc],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc["id"],
+                    "content": _safe_json_dumps(cls._compact_result_stub(tr.get("result"))),
+                })
             return {"messages": messages, "tokens": cls._estimate_tokens(messages)}
 
         for tr in tool_results:
@@ -501,6 +523,23 @@ class ConversationBuilder:
 
         degraded["_truncated"] = True
         return degraded
+
+    @staticmethod
+    def _compact_result_stub(result: Any) -> dict[str, Any]:
+        """Minimal stand-in for a tool result when a turn is compacted.
+
+        Keeps just enough metadata for the LLM to know the tool ran and
+        roughly what it produced, without paying for the full payload.
+        """
+        stub: dict[str, Any] = {"_truncated": True}
+        if isinstance(result, dict):
+            inner = result.get("result")
+            if isinstance(inner, list):
+                stub["count"] = len(inner)
+            entries = result.get("entries")
+            if isinstance(entries, list):
+                stub["entries_count"] = len(entries)
+        return stub
 
     @staticmethod
     def _estimate_tokens(messages: list[dict[str, Any]]) -> int:

@@ -727,6 +727,49 @@ async def test_conversation_builder_tool_replay_falls_back_to_text_when_very_tig
 
 
 @pytest.mark.asyncio
+async def test_conversation_builder_text_only_keeps_tool_skeleton_when_no_content(
+    monkeypatch,
+):
+    """text_only mode must not silently drop assistant turns that only contain tool calls."""
+    monkeypatch.setattr(settings, "CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET", 30)
+
+    big_rows = [{"id": i, "label": f"item-{i}" * 20} for i in range(100)]
+    plugin = DummyPlugin(context_config=None)
+    builder = ConversationBuilder(plugin)
+    messages = await builder.build_messages(
+        question="next",
+        conversation_history=[
+            {"role": "user", "content": "old q"},
+            {
+                "role": "assistant",
+                "content": "",
+                "toolResults": [_tool_result(tool_call_id="old", rows=big_rows)],
+            },
+            {"role": "user", "content": "recent q"},
+            {
+                "role": "assistant",
+                "content": "recent answer",
+                "toolResults": [_tool_result(tool_call_id="recent", rows=big_rows)],
+            },
+        ],
+    )
+
+    assistant_with_calls = [m for m in messages if m.get("tool_calls")]
+    assert len(assistant_with_calls) == 1
+    assert assistant_with_calls[0]["tool_calls"][0]["id"] == "old"
+
+    tool_msgs = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_msgs) == 1
+    payload = json.loads(tool_msgs[0]["content"])
+    assert payload["_truncated"] is True
+    assert payload["count"] == 100
+
+    diagnostics = builder.last_replay_diagnostics
+    assert diagnostics is not None
+    assert diagnostics.mode_counts == {"text_only": 2}
+
+
+@pytest.mark.asyncio
 async def test_conversation_builder_tool_replay_prioritizes_recent_turns(monkeypatch):
     """Limited budget keeps the newest turn full and degrades/drops detail from older ones."""
     monkeypatch.setattr(settings, "CONVERSATION_TOOL_HISTORY_TOKEN_BUDGET", 400)
@@ -853,6 +896,28 @@ def test_conversation_builder_degrade_result_handles_non_dict():
     assert ConversationBuilder._degrade_result("hello") == "hello"
     assert ConversationBuilder._degrade_result(None) is None
     assert ConversationBuilder._degrade_result([1, 2, 3]) == [1, 2, 3]
+
+
+def test_conversation_builder_compact_result_stub_counts_lists():
+    assert ConversationBuilder._compact_result_stub({"result": [{"i": i} for i in range(42)]}) == {
+        "_truncated": True,
+        "count": 42,
+    }
+
+
+def test_conversation_builder_compact_result_stub_counts_entries():
+    assert ConversationBuilder._compact_result_stub(
+        {"result": [], "entries": [{"title": "Doc"} for _ in range(7)]}
+    ) == {
+        "_truncated": True,
+        "count": 0,
+        "entries_count": 7,
+    }
+
+
+def test_conversation_builder_compact_result_stub_handles_non_dict():
+    assert ConversationBuilder._compact_result_stub("hello") == {"_truncated": True}
+    assert ConversationBuilder._compact_result_stub(None) == {"_truncated": True}
 
 
 def test_conversation_builder_synthesize_tool_calls_preserves_arguments():
