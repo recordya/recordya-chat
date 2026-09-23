@@ -30,7 +30,7 @@ REASONING_EFFORT_TOOLS_UNSUPPORTED = {
 @llm_providers.register("openai")
 class OpenAIProvider(BaseLLMProvider):
     """OpenAI-compatible LLM provider.
-    
+
     Works with OpenAI API, OpenRouter, Fireworks.ai, llama.cpp, and other compatible endpoints.
     """
 
@@ -41,7 +41,7 @@ class OpenAIProvider(BaseLLMProvider):
         name: str = "openai",
     ):
         """Initialize OpenAI provider.
-        
+
         Args:
             api_key: OpenAI API key (defaults to settings)
             base_url: Base URL for API (defaults to settings, allows OpenRouter)
@@ -100,7 +100,7 @@ class OpenAIProvider(BaseLLMProvider):
 
         # Check for reasoning models (o1, o3, gpt-5) that need special parameters
         model_lower = model.lower()
-        is_o_series = bool(re.search(r'(^|/)o[134](-|$|[a-z])', model_lower))
+        is_o_series = bool(re.search(r"(^|/)o[134](-|$|[a-z])", model_lower))
         is_gpt5_series = "gpt-5" in model_lower or "gpt-4.1" in model_lower
         uses_reasoning_api = is_o_series or is_gpt5_series
 
@@ -113,9 +113,7 @@ class OpenAIProvider(BaseLLMProvider):
             # those we skip it when tools are present (model uses its default level).
             reasoning_effort = kwargs.get("reasoning_effort")
             model_name = model.split("/")[-1].lower()
-            tools_block_reasoning = (
-                bool(tools) and model_name in REASONING_EFFORT_TOOLS_UNSUPPORTED
-            )
+            tools_block_reasoning = bool(tools) and model_name in REASONING_EFFORT_TOOLS_UNSUPPORTED
             if reasoning_effort is not None and not tools_block_reasoning:
                 request_params["reasoning_effort"] = reasoning_effort
         else:
@@ -157,7 +155,13 @@ class OpenAIProvider(BaseLLMProvider):
         """
         try:
             request_params = self._build_request_params(
-                messages, model, tools, tool_choice, temperature, max_tokens, kwargs,
+                messages,
+                model,
+                tools,
+                tool_choice,
+                temperature,
+                max_tokens,
+                kwargs,
             )
 
             response = await self._client.chat.completions.create(**request_params)
@@ -212,7 +216,13 @@ class OpenAIProvider(BaseLLMProvider):
         """Stream a completion using OpenAI API."""
         try:
             request_params = self._build_request_params(
-                messages, model, tools, tool_choice, temperature, max_tokens, kwargs,
+                messages,
+                model,
+                tools,
+                tool_choice,
+                temperature,
+                max_tokens,
+                kwargs,
             )
             request_params["stream"] = True
             # Ask for token usage on the final chunk where supported.
@@ -256,8 +266,7 @@ class OpenAIProvider(BaseLLMProvider):
                         yield {"type": "tool_call_started"}
                     entry = tool_calls_acc.setdefault(
                         idx,
-                        {"id": None, "type": "function",
-                         "function": {"name": "", "arguments": ""}},
+                        {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
                     )
                     if getattr(tc, "id", None):
                         entry["id"] = tc.id
@@ -271,9 +280,7 @@ class OpenAIProvider(BaseLLMProvider):
                             entry["function"]["arguments"] += fn.arguments
 
             tool_calls_final = (
-                [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
-                if tool_calls_acc
-                else None
+                [tool_calls_acc[i] for i in sorted(tool_calls_acc)] if tool_calls_acc else None
             )
             content_final = "".join(content_parts) if content_parts else None
 
@@ -289,7 +296,7 @@ class OpenAIProvider(BaseLLMProvider):
                 final_result["request_overrides"] = request_overrides
             yield final_result
 
-        except Exception as e:
+        except BaseException as e:
             raise LLMError(f"OpenAI API error: {e}") from e
 
     async def health_check(self) -> bool:
@@ -298,5 +305,5 @@ class OpenAIProvider(BaseLLMProvider):
             # Simple models list call to check connectivity
             await self._client.models.list()
             return True
-        except Exception:
+        except BaseException:
             return False
