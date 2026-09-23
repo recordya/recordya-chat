@@ -457,6 +457,7 @@ class AgentService:
                 if not tool_calls:
                     final_content = leaked_guard.finalize(content)
                     if not final_content and not _has_renderable_results(tool_history):
+                        logger.warning("Empty response from LLM")
                         final_content = _FALLBACK_CONTENT
                     final_content = _merge_user_notice(final_content, tool_history)
 
