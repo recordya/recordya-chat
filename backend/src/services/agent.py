@@ -151,6 +151,16 @@ def _get_latest_user_notice(tool_history: list[dict[str, Any]]) -> str | None:
     return None
 
 
+def _with_text_from_tool_calls(final: str, text_with_tool_calls: str) -> str:
+    """The final answer, keeping the text written with the last tool calls in front of the
+    last message unless that message already contains it (the streamed text the user saw)."""
+    if not text_with_tool_calls:
+        return final
+    if " ".join(text_with_tool_calls.split()).casefold() in " ".join(final.split()).casefold():
+        return final
+    return f"{text_with_tool_calls}\n\n{final.strip()}" if final.strip() else text_with_tool_calls
+
+
 def _merge_user_notice(content: str | None, tool_history: list[dict[str, Any]]) -> str:
     final_content = content or ""
     user_notice = _get_latest_user_notice(tool_history)
@@ -391,9 +401,9 @@ class AgentService:
         try:
             effective_model = model
             request_overrides: dict[str, Any] = {}
-            # Text the model wrote together with tool calls (e.g. the answer written in
-            # the same message as the call that shows its sources); the final answer
-            # when the model ends with an empty message.
+            # Text the model wrote together with its last tool calls (e.g. the answer
+            # written in the same message as the call that shows its sources); it stays
+            # part of the final answer when the last message does not repeat it.
             text_with_tool_calls = ""
             # Agentic loop
             while iterations < MAX_ITERATIONS:
@@ -459,10 +469,9 @@ class AgentService:
 
                 # If no tool calls, we have final response
                 if not tool_calls:
-                    final_content = leaked_guard.finalize(content)
-                    if not final_content.strip() and text_with_tool_calls:
-                        logger.info("Empty final message: using the text written with the last tool calls")
-                        final_content = text_with_tool_calls
+                    final_content = _with_text_from_tool_calls(
+                        leaked_guard.finalize(content), text_with_tool_calls
+                    )
                     if not final_content and not _has_renderable_results(tool_history):
                         logger.warning("Empty response from LLM")
                         final_content = _FALLBACK_CONTENT
@@ -495,8 +504,7 @@ class AgentService:
                     return
 
                 # Process tool calls
-                if content and content.strip():
-                    text_with_tool_calls = leaked_guard.finalize(content).strip() or text_with_tool_calls
+                text_with_tool_calls = leaked_guard.finalize(content).strip() if content else ""
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": content,

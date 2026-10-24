@@ -1729,9 +1729,40 @@ async def test_answer_written_with_a_tool_call_is_kept_when_the_final_message_is
 
 
 @pytest.mark.asyncio
-async def test_final_message_wins_over_text_written_with_tool_calls(plugin):
+async def test_answer_written_with_a_tool_call_stays_in_front_of_a_short_last_message(plugin):
+    responses = [
+        {"content": None, "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {
+            "content": "Spółka została zarejestrowana 14.07.2017 r.",
+            "tool_calls": [{"id": "c2", "function": {"name": "test_query", "arguments": "{}"}}],
+        },
+        {"content": "*(Dokumenty: odpis.pdf)*", "tool_calls": None},
+    ]
+    service = AgentService(plugin, MockLLMProvider(responses))
+
+    result = await get_final_result(service.run("Kiedy założono spółkę?"))
+
+    assert result["content"] == "Spółka została zarejestrowana 14.07.2017 r.\n\n*(Dokumenty: odpis.pdf)*"
+
+
+@pytest.mark.asyncio
+async def test_last_message_repeating_the_answer_is_not_doubled(plugin):
+    responses = [
+        {"content": "Zarejestrowana 14.07.2017.", "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {"content": "Spółka została  zarejestrowana 14.07.2017. Źródło: odpis KRS.", "tool_calls": None},
+    ]
+    service = AgentService(plugin, MockLLMProvider(responses))
+
+    result = await get_final_result(service.run("Pytanie"))
+
+    assert result["content"] == "Spółka została  zarejestrowana 14.07.2017. Źródło: odpis KRS."
+
+
+@pytest.mark.asyncio
+async def test_only_the_text_of_the_last_tool_calls_is_kept(plugin):
     responses = [
         {"content": "Szukam dokumentów.", "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {"content": None, "tool_calls": [{"id": "c2", "function": {"name": "test_query", "arguments": "{}"}}]},
         {"content": "Odpowiedź końcowa.", "tool_calls": None},
     ]
     service = AgentService(plugin, MockLLMProvider(responses))
