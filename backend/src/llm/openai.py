@@ -172,6 +172,10 @@ class OpenAIProvider(BaseLLMProvider):
                 "tool_calls": None,
                 "usage": None,
                 "model": getattr(response, "model", None) or model,
+                # Diagnostics: why generation stopped, and text the server put aside as
+                # reasoning (vLLM reasoning parsers) instead of content.
+                "finish_reason": getattr(response.choices[0], "finish_reason", None),
+                "reasoning_chars": len(getattr(message, "reasoning_content", None) or ""),
             }
 
             if message.tool_calls:
@@ -229,6 +233,8 @@ class OpenAIProvider(BaseLLMProvider):
             request_params.setdefault("stream_options", {"include_usage": True})
 
             content_parts: list[str] = []
+            finish_reason: str | None = None
+            reasoning_chars = 0
             tool_calls_acc: dict[int, dict[str, Any]] = {}
             final_model: str | None = None
             usage: dict[str, int] | None = None
@@ -248,9 +254,11 @@ class OpenAIProvider(BaseLLMProvider):
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
+                finish_reason = getattr(choices[0], "finish_reason", None) or finish_reason
                 delta = getattr(choices[0], "delta", None)
                 if delta is None:
                     continue
+                reasoning_chars += len(getattr(delta, "reasoning_content", None) or "")
 
                 delta_content = getattr(delta, "content", None)
                 if delta_content:
@@ -290,6 +298,8 @@ class OpenAIProvider(BaseLLMProvider):
                 "tool_calls": tool_calls_final,
                 "usage": usage,
                 "model": final_model or model,
+                "finish_reason": finish_reason,
+                "reasoning_chars": reasoning_chars,
             }
             request_overrides = self._extract_request_overrides(request_params)
             if request_overrides:
