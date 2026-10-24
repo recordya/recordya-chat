@@ -17,6 +17,7 @@ Supports both:
 """
 
 import asyncio
+import time
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack
@@ -30,7 +31,14 @@ from src.core.exceptions import LLMError
 from src.core.global_tools import get_global_tool_registry
 from src.core.i18n import translate
 from src.core.langfuse import get_langfuse
-from src.core.protocols import AnswerSources, BasePlugin, ExecutablePlugin, ManagedPlugin
+from src.core.protocols import (
+    AnswerSources,
+    BasePlugin,
+    ExecutablePlugin,
+    ManagedPlugin,
+    PreparedAnswer,
+    PreparedStep,
+)
 from src.llm.client import LlmFacade
 from src.plugin_sdk.sql import BaseSQLPlugin
 from src.services.agent_helpers import (
@@ -415,6 +423,39 @@ class AgentService:
             empty_answer_retried = False
             # The plugin's choice of the answer's sources, asked once per run.
             sources_selected = False
+
+            # A plugin may prepare the turn in code (e.g. plan, searches, sources); with
+            # sources, the model only writes the answer from them.
+            prepared: PreparedAnswer | None = None
+            async for event, result in self._prepare_answer(plugin, question, conversation_history, tool_history):
+                if event is not None:
+                    yield event
+                prepared = result if result is not None else prepared
+            if prepared is not None and prepared.sources is not None:
+                sources_selected = True
+                answer: dict[str, Any] | None = None
+                async for event, final_response in self._answer_from_sources(
+                    prepared.sources, messages, model, kwargs, 1, tool_history
+                ):
+                    if event is not None:
+                        yield event
+                    if final_response is not None:
+                        answer = final_response
+                answer_text = ((answer or {}).get("content") or "").strip()
+                if answer_text:
+                    logger.info("Emitting complete event: prepared answer, tool_count=%s", len(tool_history))
+                    lf_run.finish(output={"content": answer_text, "prepared": True, "tool_count": len(tool_history)})
+                    yield {
+                        "type": "complete",
+                        "data": self._build_result(
+                            _merge_user_notice(answer_text, tool_history),
+                            tool_history,
+                            1,
+                            langfuse_trace_id=lf_run.trace_id,
+                        ),
+                    }
+                    return
+                logger.warning("Empty answer from the prepared sources; running the agent loop")
             # Agentic loop
             while iterations < MAX_ITERATIONS:
                 iterations += 1
@@ -661,6 +702,56 @@ class AgentService:
             # finish() is idempotent, so happy/error paths above remain authoritative.
             if not lf_run.finished:
                 lf_run.finish(level="WARNING", status_message="cancelled")
+
+    @staticmethod
+    async def _prepare_answer(
+        plugin: ManagedPlugin,
+        question: str,
+        conversation_history: list[dict[str, Any]] | None,
+        tool_history: list[dict[str, Any]],
+    ) -> AsyncGenerator[tuple[dict[str, Any] | None, PreparedAnswer | None], None]:
+        """Run the plugin's ``prepare_answer`` as tool steps; yields events, then the result."""
+        if type(plugin).prepare_answer is ManagedPlugin.prepare_answer:
+            return
+        tool_name = getattr(plugin, "prepare_tool_name", "prepare_answer")
+        yield {
+            "type": "status",
+            "data": {
+                "message": translate("agent.status.default"),
+                "step": 0,
+                "tool_id": "prepared-0",
+                "tool_name": tool_name,
+                "arguments": {"question": question},
+                "reasoning": None,
+            },
+        }, None
+        started = time.monotonic()
+        try:
+            prepared = await plugin.prepare_answer(question, conversation_history)
+        except Exception as error:  # noqa: BLE001 - the agent loop still answers
+            logger.warning("Preparing the answer failed: %s", error)
+            prepared = None
+        steps = (prepared.steps if prepared is not None else []) or [
+            PreparedStep(tool_name=tool_name, result={"success": True, "result": [], "row_count": 0})
+        ]
+        for index, step in enumerate(steps):
+            tool_id = f"prepared-{index}"
+            if index > 0:
+                yield {
+                    "type": "status",
+                    "data": {"message": translate("agent.status.default"), "step": 0, "tool_id": tool_id,
+                             "tool_name": step.tool_name, "arguments": step.arguments, "reasoning": None},
+                }, None
+            duration_ms = int((time.monotonic() - started) * 1000) if index == 0 else 0
+            tool_history.append({"tool": step.tool_name, "tool_call_id": tool_id, "arguments": step.arguments,
+                                 "result": step.result, "duration_ms": duration_ms})
+            yield {
+                "type": "tool",
+                "data": {"name": step.tool_name, "duration_ms": duration_ms, "tool_id": tool_id,
+                         "success": step.result.get("success"), "row_count": step.result.get("row_count"),
+                         "error": step.result.get("error"), "result": step.result},
+            }, None
+        yield None, prepared
 
     @staticmethod
     async def _select_answer_sources(

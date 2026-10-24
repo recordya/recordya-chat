@@ -185,6 +185,28 @@ class AnswerSources:
 
 
 @dataclass
+class PreparedStep:
+    """A step a ManagedPlugin ran in code before the model, shown as a tool step."""
+
+    tool_name: str
+    result: dict[str, Any]
+    arguments: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PreparedAnswer:
+    """What ``ManagedPlugin.prepare_answer`` did before the model is called.
+
+    ``steps`` are shown as tool steps (the first one is the step shown while the hook
+    runs). With ``sources`` the answer is written from them without tools and the agent
+    loop is skipped; without, the agent loop handles the turn as usual.
+    """
+
+    steps: list[PreparedStep] = field(default_factory=list)
+    sources: AnswerSources | None = None
+
+
+@dataclass
 class ContextConfig:
     """Tells ConversationBuilder how to extract and summarise query results.
 
@@ -261,6 +283,20 @@ class ManagedPlugin(BasePlugin):
         conversation history, or normalized before ``execute_tool()`` runs.
         """
         return arguments
+
+    #: Name of the step shown while ``prepare_answer`` runs.
+    prepare_tool_name: str = "prepare_answer"
+
+    async def prepare_answer(
+        self, question: str, conversation_history: list[dict[str, Any]] | None
+    ) -> PreparedAnswer | None:
+        """Prepare the turn in code before the model is called.
+
+        A plugin can run a fixed pipeline (e.g. plan, searches, choice of sources) and return
+        the steps it ran and the sources of the answer; the model then only writes the answer
+        from them, without tools. ``None`` (default) runs the agent loop as usual.
+        """
+        return None
 
     async def select_answer_sources(
         self, question: str, tool_history: list[dict[str, Any]]
