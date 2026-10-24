@@ -1,5 +1,6 @@
 """OpenAI-compatible LLM provider (works with OpenRouter, Fireworks, llama.cpp, etc.)."""
 
+import logging
 import re
 from collections.abc import AsyncIterator
 from typing import Any
@@ -11,6 +12,9 @@ from src.core.exceptions import LLMError
 from src.core.registry import llm_providers
 
 from .base import BaseLLMProvider
+from .repetition import repeated_tail_start
+
+logger = logging.getLogger(__name__)
 
 # Providers that use standard OpenAI API (no reasoning_effort, max_completion_tokens)
 STANDARD_API_PROVIDERS = ["fireworks", "llama", "together", "anyscale", "groq", "ollama"]
@@ -229,6 +233,7 @@ class OpenAIProvider(BaseLLMProvider):
             request_params.setdefault("stream_options", {"include_usage": True})
 
             content_parts: list[str] = []
+            content_so_far = ""
             tool_calls_acc: dict[int, dict[str, Any]] = {}
             final_model: str | None = None
             usage: dict[str, int] | None = None
@@ -256,6 +261,22 @@ class OpenAIProvider(BaseLLMProvider):
                 if delta_content:
                     content_parts.append(delta_content)
                     yield {"type": "content", "delta": delta_content}
+                    # Stop a degenerate loop: cut the repeated run and close the upstream
+                    # stream so the LLM stops generating. The final content (which the
+                    # frontend shows instead of the streamed text) is the text before it.
+                    content_so_far += delta_content
+                    loop_start = repeated_tail_start(content_so_far)
+                    if loop_start is not None:
+                        logger.warning(
+                            "Stopping LLM stream: output repeats itself (%d of %d characters)",
+                            len(content_so_far) - loop_start,
+                            len(content_so_far),
+                        )
+                        content_parts = [content_so_far[:loop_start].rstrip()]
+                        close = getattr(stream, "close", None) or getattr(stream, "aclose", None)
+                        if close is not None:
+                            await close()
+                        break
 
                 delta_tool_calls = getattr(delta, "tool_calls", None) or []
                 for tc in delta_tool_calls:

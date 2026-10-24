@@ -43,6 +43,9 @@ class ModelPolicy:
         self.max_agent_tokens = int(os.environ.get("MAX_AGENT_TOKENS", 8000))
         self.agent_temperature = float(os.environ.get("AGENT_TEMPERATURE", 0))
         self.agent_reasoning = os.environ.get("AGENT_REASONING", "low")
+        # OpenAI-style frequency penalty for agent answers (0 = not sent). A small value
+        # (0.1-0.3) discourages a model from looping on the same tokens.
+        self.agent_frequency_penalty = float(os.environ.get("AGENT_FREQUENCY_PENALTY", 0))
 
     def for_purpose(self, model: str, purpose: str) -> dict[str, Any]:
         if purpose == "summary":
@@ -56,6 +59,8 @@ class ModelPolicy:
 
         if _is_reasoning_model(model):
             params["reasoning_effort"] = self.agent_reasoning
+        elif self.agent_frequency_penalty:
+            params["frequency_penalty"] = self.agent_frequency_penalty
 
         return params
 

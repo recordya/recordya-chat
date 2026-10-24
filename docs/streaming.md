@@ -117,6 +117,7 @@ The `tool_call_started` chunk is optional. Providers that don't emit it (includi
 - The first delta for a given tool-call index yields `tool_call_started` exactly once for that index.
 - Tool-call deltas (`id`, `name`, `arguments`) are accumulated internally and surfaced only via the final `tool_calls` array — never on the text channel.
 - The provider requests `stream_options={"include_usage": True}` so the final chunk carries token usage.
+- Repetition guard: when the streamed text ends with one unit of up to 80 characters repeated over at least 400 characters (`src/llm/repetition.py`), the provider closes the upstream stream, so the LLM stops generating, and the `final` content is the text before the repeated run. The frontend then shows that content from the `complete` event instead of the streamed loop. Without the guard a looping model streams until `MAX_AGENT_TOKENS`. `AGENT_FREQUENCY_PENALTY` (default `0`, not sent) additionally sends an OpenAI-style `frequency_penalty` with agent requests to non-reasoning models.
 
 ## 6. Frontend Consumption
 
@@ -144,7 +145,8 @@ No `complete` or `error` SSE event is emitted on cancellation. Tokens delivered 
 
 Streaming behaviour is covered by:
 
-- `core/backend/tests/test_openai_provider_stream.py` — `OpenAIProvider.stream()` contract: content deltas, `tool_call_started` emission rules, parallel tool calls, usage propagation, request overrides.
+- `core/backend/tests/test_openai_provider_stream.py` — `OpenAIProvider.stream()` contract: content deltas, `tool_call_started` emission rules, parallel tool calls, usage propagation, request overrides, stopping a repetition loop.
+- `core/backend/tests/test_llm_repetition.py` — detection of a repeated run at the end of the streamed text.
 - `core/backend/tests/test_agent_service.py` (Streaming section) — `AgentService._stream_llm()` and `run()`: token forwarding, Variant B suppression after `tool_call_started`, suppression when only a `final` chunk reports `tool_calls`, empty-delta filtering, `token_reset` emission on leaked-tool retry, task-cancellation propagation into the provider stream and preservation of partial tokens.
 - `core/frontend/src/lib/agentStreamClient.test.ts` — SSE wire parsing on the consumer side, plus `AbortSignal` forwarding and mid-stream abort behaviour.
 - `core/frontend/src/utils/tokenBatcher.test.ts` — token batcher unit tests: synchronous `value` accuracy, one flush per scheduled frame (coalescing a burst into a single update), `flushNow()` on completion/abort, and `reset()` cancelling a pending flush.
