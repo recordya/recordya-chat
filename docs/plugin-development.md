@@ -1294,7 +1294,7 @@ A managed plugin can fix the sources of the final answer instead of relying on t
 - `prompt`: the sources (e.g. titles and fragments) and how to answer from them;
 - `message`: the step's status text.
 
-AgentService calls it once per run, when the model stops calling tools (after at least one tool call). With sources, it discards the model's last message (`token_reset` if it was streamed), shows the step, adds `prompt` as a user message and asks the model for the answer without tools; that answer is final. `None` (default) or an exception keeps the model's own answer.
+AgentService calls it once per run, when the model stops calling tools (after at least one tool call). With sources, it discards the model's last message (`token_reset` if it was streamed), shows the step, adds `prompt` as a user message and asks the model for the answer without tools; that answer is final. `None` (default) or an exception keeps the model's own answer. When the agent reaches the iteration limit, the hook is called as well, so the user still gets an answer from the chosen sources instead of the iteration-limit error.
 
 ```python
 from src.plugin_sdk import AnswerSources

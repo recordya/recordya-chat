@@ -1874,3 +1874,18 @@ async def test_sources_are_not_chosen_without_tool_calls():
     result = await get_final_result(service.run("Cześć"))
 
     assert result["content"] == "Cześć!" and plugin.calls == []
+
+
+
+@pytest.mark.asyncio
+async def test_at_the_iteration_limit_the_answer_is_written_from_the_plugins_sources():
+    plugin = SourcesPlugin(AnswerSources(result={"success": True, "result": [], "row_count": 0}, prompt="Źródła: A.pdf"))
+    looping = {"content": None, "tool_calls": [{"id": "c", "function": {"name": "test_query", "arguments": "{}"}}]}
+    llm = ToolsRecordingLLM([looping] * MAX_ITERATIONS + [{"content": "Odpowiedź ze źródeł.", "tool_calls": None}])
+    service = AgentService(plugin, llm)
+
+    events = await collect_events(service.run("Kiedy?"))
+
+    complete = next(e for e in events if e["type"] == "complete")["data"]
+    assert complete["content"] == "Odpowiedź ze źródeł." and not complete.get("error")
+    assert llm.tools_per_call[-1] is None and len(plugin.calls) == 1
