@@ -30,7 +30,7 @@ from src.core.exceptions import LLMError
 from src.core.global_tools import get_global_tool_registry
 from src.core.i18n import translate
 from src.core.langfuse import get_langfuse
-from src.core.protocols import BasePlugin, ExecutablePlugin, ManagedPlugin
+from src.core.protocols import AnswerSources, BasePlugin, ExecutablePlugin, ManagedPlugin
 from src.llm.client import LlmFacade
 from src.plugin_sdk.sql import BaseSQLPlugin
 from src.services.agent_helpers import (
@@ -413,6 +413,8 @@ class AgentService:
             text_with_tool_calls = ""
             # One retry when the model ends its turn with an empty message.
             empty_answer_retried = False
+            # The plugin's choice of the answer's sources, asked once per run.
+            sources_selected = False
             # Agentic loop
             while iterations < MAX_ITERATIONS:
                 iterations += 1
@@ -476,6 +478,26 @@ class AgentService:
                     continue
 
                 # If no tool calls, we have final response
+                if not tool_calls and not sources_selected and tool_history:
+                    sources_selected = True
+                    selection = await self._select_answer_sources(plugin, question, tool_history)
+                    if selection is not None:
+                        if iteration_streamed_tokens:
+                            # The model's own draft is replaced by the answer from the sources.
+                            yield {"type": "token_reset", "data": {}}
+                        answer: dict[str, Any] | None = None
+                        async for event, final_response in self._answer_from_sources(
+                            selection, messages, model, kwargs, iterations, tool_history
+                        ):
+                            if event is not None:
+                                yield event
+                            if final_response is not None:
+                                answer = final_response
+                        if answer is not None and (answer.get("content") or "").strip():
+                            content = answer.get("content")
+                            response = answer
+                            text_with_tool_calls = ""
+
                 if not tool_calls:
                     final_content = _with_text_from_tool_calls(
                         leaked_guard.finalize(content), text_with_tool_calls
@@ -573,6 +595,31 @@ class AgentService:
 
             # Max iterations reached
             logger.warning(f"Agent reached max iterations ({MAX_ITERATIONS})")
+            # A plugin that chooses the answer's sources still gets an answer from them.
+            if not sources_selected and tool_history:
+                selection = await self._select_answer_sources(plugin, question, tool_history)
+                if selection is not None:
+                    answer = None
+                    async for event, final_response in self._answer_from_sources(
+                        selection, messages, model, kwargs, iterations, tool_history
+                    ):
+                        if event is not None:
+                            yield event
+                        if final_response is not None:
+                            answer = final_response
+                    answer_text = ((answer or {}).get("content") or "").strip()
+                    if answer_text:
+                        lf_run.finish(level="WARNING", status_message="max_iterations_answered_from_sources")
+                        yield {
+                            "type": "complete",
+                            "data": self._build_result(
+                                _merge_user_notice(answer_text, tool_history),
+                                tool_history,
+                                iterations,
+                                langfuse_trace_id=lf_run.trace_id,
+                            ),
+                        }
+                        return
             lf_run.finish(level="WARNING", status_message="max_iterations_reached")
             yield {
                 "type": "complete",
@@ -614,6 +661,68 @@ class AgentService:
             # finish() is idempotent, so happy/error paths above remain authoritative.
             if not lf_run.finished:
                 lf_run.finish(level="WARNING", status_message="cancelled")
+
+    @staticmethod
+    async def _select_answer_sources(
+        plugin: ManagedPlugin, question: str, tool_history: list[dict[str, Any]]
+    ) -> AnswerSources | None:
+        """The plugin's choice of the answer's sources; a failing plugin keeps the model's answer."""
+        try:
+            return await plugin.select_answer_sources(question, tool_history)
+        except Exception as error:  # noqa: BLE001 - the model's own answer is still there
+            logger.warning("Choosing the answer's sources failed: %s", error)
+            return None
+
+    async def _answer_from_sources(
+        self,
+        selection: AnswerSources,
+        messages: list[dict[str, Any]],
+        model: str,
+        kwargs: dict[str, Any],
+        iteration: int,
+        tool_history: list[dict[str, Any]],
+    ) -> AsyncGenerator[tuple[dict[str, Any] | None, dict[str, Any] | None], None]:
+        """Show the chosen sources, then stream the answer written from them without tools;
+        yields ``(event, None)`` and finally ``(None, response)``."""
+        async for event in self._show_answer_sources(selection, iteration, tool_history):
+            yield event, None
+        messages.append({"role": "user", "content": selection.prompt})
+        async for sse_event, final_response in self._stream_llm(messages=messages, model=model, tools=None, kwargs=kwargs):
+            yield sse_event, final_response
+
+    @staticmethod
+    async def _show_answer_sources(
+        selection: AnswerSources, iteration: int, tool_history: list[dict[str, Any]]
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Show the chosen sources as a ``select_sources`` tool step and record it."""
+        tool_id = f"answer-sources-{iteration}"
+        yield {
+            "type": "status",
+            "data": {
+                "message": selection.message or translate("agent.status.default"),
+                "step": iteration,
+                "tool_id": tool_id,
+                "tool_name": "select_sources",
+                "arguments": {},
+                "reasoning": None,
+            },
+        }
+        result = selection.result
+        tool_history.append(
+            {"tool": "select_sources", "tool_call_id": tool_id, "arguments": {}, "result": result, "duration_ms": 0}
+        )
+        yield {
+            "type": "tool",
+            "data": {
+                "name": "select_sources",
+                "duration_ms": 0,
+                "tool_id": tool_id,
+                "success": result.get("success"),
+                "row_count": result.get("row_count"),
+                "error": result.get("error"),
+                "result": result,
+            },
+        }
 
     def _get_status_hint(self, tool_name: str, tools: list[dict[str, Any]]) -> str:
         """Get status hint for a tool from the provided definitions or defaults."""
