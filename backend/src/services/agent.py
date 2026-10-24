@@ -391,6 +391,10 @@ class AgentService:
         try:
             effective_model = model
             request_overrides: dict[str, Any] = {}
+            # Text the model wrote together with tool calls (e.g. the answer written in
+            # the same message as the call that shows its sources); the final answer
+            # when the model ends with an empty message.
+            text_with_tool_calls = ""
             # Agentic loop
             while iterations < MAX_ITERATIONS:
                 iterations += 1
@@ -456,6 +460,9 @@ class AgentService:
                 # If no tool calls, we have final response
                 if not tool_calls:
                     final_content = leaked_guard.finalize(content)
+                    if not final_content.strip() and text_with_tool_calls:
+                        logger.info("Empty final message: using the text written with the last tool calls")
+                        final_content = text_with_tool_calls
                     if not final_content and not _has_renderable_results(tool_history):
                         logger.warning("Empty response from LLM")
                         final_content = _FALLBACK_CONTENT
@@ -488,6 +495,8 @@ class AgentService:
                     return
 
                 # Process tool calls
+                if content and content.strip():
+                    text_with_tool_calls = leaked_guard.finalize(content).strip() or text_with_tool_calls
                 assistant_msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": content,
