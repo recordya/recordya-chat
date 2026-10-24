@@ -90,6 +90,11 @@ event: complete      data: {...}
 
 Frontend handling: `useAgentStream.onTokenReset()` calls the token batcher's `reset()` (cancels any pending frame flush and clears its buffer), so the retry tokens land in a clean buffer.
 
+### Final answer
+
+- Text the model writes together with its last tool calls (e.g. the answer written in the same message as the call that shows its sources) stays in front of the last message, unless the last message already contains it.
+- A last message without text and without tool calls is retried once with a short correction ("Your last message was empty…"); the warning logs `finish_reason`, the completion tokens and `reasoning_chars` (text a vLLM reasoning parser put aside instead of content). Text removed by the leaked-tool guard does not count as empty: that guard retries on its own.
+
 ## 4. Role-Based Redaction
 
 `chat.py::_redact_event` filters event payloads per consumer role before serialisation:

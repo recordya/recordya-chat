@@ -1770,3 +1770,36 @@ async def test_only_the_text_of_the_last_tool_calls_is_kept(plugin):
     result = await get_final_result(service.run("Pytanie"))
 
     assert result["content"] == "Odpowiedź końcowa."
+
+
+
+@pytest.mark.asyncio
+async def test_an_empty_final_message_is_retried_once(plugin):
+    responses = [
+        {"content": None, "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {"content": "", "tool_calls": None, "finish_reason": "stop", "reasoning_chars": 4000},
+        {"content": "Odpowiedź po ponowieniu.", "tool_calls": None},
+    ]
+    llm = MockLLMProvider(responses)
+    service = AgentService(plugin, llm)
+
+    result = await get_final_result(service.run("Pytanie"))
+
+    assert result["content"] == "Odpowiedź po ponowieniu."
+    assert "empty" in llm.messages_history[-1][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_final_message_is_retried_only_once(plugin):
+    responses = [
+        {"content": None, "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {"content": "", "tool_calls": None},
+        {"content": "", "tool_calls": None},
+    ]
+    llm = MockLLMProvider(responses)
+    service = AgentService(plugin, llm)
+
+    result = await get_final_result(service.run("Pytanie"))
+
+    assert llm.call_count == 3
+    assert result["content"] == ""  # renderable results exist: no fallback text, as before

@@ -49,6 +49,12 @@ MAX_ITERATIONS = settings.MAX_ITERATIONS  # Safety limit for agentic loop (confi
 TOOL_TIMEOUT = 30  # Timeout for single tool execution (seconds)
 _FALLBACK_CONTENT = translate("agent.fallback_content")
 
+# Sent to the model once when it ends its turn with an empty message.
+_EMPTY_ANSWER_CORRECTION = (
+    "Your last message was empty. Write the answer to the user's question now, based on "
+    "the tool results above, or call a tool if you still need one."
+)
+
 # Substrings that indicate the upstream model is temporarily unavailable.
 # Keep this as the single source for both retry and user-facing classification.
 _MODEL_UNAVAILABLE_PATTERNS: tuple[str, ...] = (
@@ -405,6 +411,8 @@ class AgentService:
             # written in the same message as the call that shows its sources); it stays
             # part of the final answer when the last message does not repeat it.
             text_with_tool_calls = ""
+            # One retry when the model ends its turn with an empty message.
+            empty_answer_retried = False
             # Agentic loop
             while iterations < MAX_ITERATIONS:
                 iterations += 1
@@ -472,6 +480,20 @@ class AgentService:
                     final_content = _with_text_from_tool_calls(
                         leaked_guard.finalize(content), text_with_tool_calls
                     )
+                    if not (content or "").strip() and not final_content.strip() and not empty_answer_retried:
+                        # An empty last message is a failed turn, not an answer (e.g. a
+                        # tool call the server could not parse). Text the leaked-tool
+                        # guard removed is not empty: that guard retries on its own.
+                        logger.warning(
+                            "Empty final message from LLM (finish_reason=%s, completion_tokens=%s, "
+                            "reasoning_chars=%s); retrying once",
+                            response.get("finish_reason"),
+                            (response.get("usage") or {}).get("completion_tokens"),
+                            response.get("reasoning_chars"),
+                        )
+                        empty_answer_retried = True
+                        messages.append({"role": "user", "content": _EMPTY_ANSWER_CORRECTION})
+                        continue
                     if not final_content and not _has_renderable_results(tool_history):
                         logger.warning("Empty response from LLM")
                         final_content = _FALLBACK_CONTENT

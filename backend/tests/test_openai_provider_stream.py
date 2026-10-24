@@ -289,3 +289,18 @@ async def test_stream_skips_empty_choices_and_none_delta():
 
     content_events = [e for e in events if e["type"] == "content"]
     assert [e["delta"] for e in content_events] == ["done"]
+
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_finish_reason_and_reasoning_length():
+    provider = _make_provider()
+    chunks = [_chunk(content="Hi")]
+    chunks[0].choices[0].finish_reason = "stop"
+    chunks[0].choices[0].delta.reasoning_content = "thinking..."
+    _install_fake_stream(provider, chunks)
+
+    events = await _collect(provider, messages=[], model="gpt-4o-mini")
+
+    final = next(e for e in events if e["type"] == "final")
+    assert final["finish_reason"] == "stop" and final["reasoning_chars"] == len("thinking...")
