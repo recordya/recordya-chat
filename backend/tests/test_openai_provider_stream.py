@@ -289,3 +289,41 @@ async def test_stream_skips_empty_choices_and_none_delta():
 
     content_events = [e for e in events if e["type"] == "content"]
     assert [e["delta"] for e in content_events] == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_stream_stops_a_repetition_loop_and_trims_it_from_the_final_content():
+    provider = _make_provider()
+    closed: list[bool] = []
+    chunks = [_chunk(content="Repertorium A nr 2425/2019.\n\ncase_id: ")] + [
+        _chunk(content="473938") for _ in range(500)
+    ]
+
+    async def fake_create(**kwargs: Any) -> Any:
+        class Stream:
+            def __init__(self) -> None:
+                self._chunks = iter(chunks)
+
+            def __aiter__(self) -> "Stream":
+                return self
+
+            async def __anext__(self) -> SimpleNamespace:
+                try:
+                    return next(self._chunks)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+            async def close(self) -> None:
+                closed.append(True)
+
+        return Stream()
+
+    provider._client.chat.completions.create = fake_create  # type: ignore[attr-defined]
+
+    events = await _collect(provider, messages=[], model="google/gemma-4-26B-A4B-it")
+
+    deltas = [e for e in events if e["type"] == "content"]
+    assert len(deltas) < 100  # stopped long before the 500 repeated chunks
+    assert closed == [True]  # the upstream stream is closed, the LLM stops generating
+    final = next(e for e in events if e["type"] == "final")
+    assert final["content"] == "Repertorium A nr 2425/2019.\n\ncase_id:"

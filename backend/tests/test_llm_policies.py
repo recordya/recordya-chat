@@ -26,3 +26,15 @@ def test_model_policy_summary_non_openai_defaults():
     params = policy.for_purpose(model="google/gemini-1.5", purpose="summary")
     assert params["max_tokens"] == 4000
     assert params["temperature"] == 0.7
+
+
+def test_model_policy_agent_frequency_penalty_is_sent_only_when_set(monkeypatch):
+    monkeypatch.delenv("AGENT_FREQUENCY_PENALTY", raising=False)
+    params = ModelPolicy().for_purpose(model="google/gemma-4", purpose="agent")
+    assert "frequency_penalty" not in params
+
+    monkeypatch.setenv("AGENT_FREQUENCY_PENALTY", "0.2")
+    policy = ModelPolicy()
+    assert policy.for_purpose(model="google/gemma-4", purpose="agent")["frequency_penalty"] == 0.2
+    # reasoning models do not accept it
+    assert "frequency_penalty" not in policy.for_purpose(model="openai/o1", purpose="agent")
