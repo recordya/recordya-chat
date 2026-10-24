@@ -93,6 +93,7 @@ Frontend handling: `useAgentStream.onTokenReset()` calls the token batcher's `re
 ### Final answer
 
 - Text the model writes together with its last tool calls (e.g. the answer written in the same message as the call that shows its sources) stays in front of the last message, unless the last message already contains it.
+- A ManagedPlugin may choose the answer's sources once the model stops calling tools (`select_answer_sources`): the model's last message is discarded (`token_reset` if streamed), a `select_sources` step shows the sources (`status` + `tool` events), and the answer is generated from them without tools.
 - A last message without text and without tool calls is retried once with a short correction ("Your last message was empty…"); the warning logs `finish_reason`, the completion tokens and `reasoning_chars` (text a vLLM reasoning parser put aside instead of content). Text removed by the leaked-tool guard does not count as empty: that guard retries on its own.
 
 ## 4. Role-Based Redaction

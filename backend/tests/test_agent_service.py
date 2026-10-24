@@ -10,7 +10,7 @@ import pytest
 
 from src.core.config import settings
 from src.core.i18n import translate
-from src.core.protocols import ManagedPlugin
+from src.core.protocols import AnswerSources, ManagedPlugin
 from src.services.agent import (
     _FALLBACK_CONTENT,
     MAX_ITERATIONS,
@@ -1803,3 +1803,74 @@ async def test_an_empty_final_message_is_retried_only_once(plugin):
 
     assert llm.call_count == 3
     assert result["content"] == ""  # renderable results exist: no fallback text, as before
+
+
+
+class SourcesPlugin(MockPlugin):
+    """Chooses the answer's sources after the tool calls."""
+
+    def __init__(self, sources: AnswerSources | None) -> None:
+        super().__init__()
+        self.sources = sources
+        self.calls: list[tuple[str, int]] = []
+
+    async def select_answer_sources(self, question, tool_history):
+        self.calls.append((question, len(tool_history)))
+        return self.sources
+
+
+class ToolsRecordingLLM(MockLLMProvider):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.tools_per_call: list[Any] = []
+
+    async def complete(self, messages, model, tools=None, tool_choice=None, **kwargs):
+        self.tools_per_call.append(tools)
+        return await super().complete(messages, model, tools, tool_choice, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_answer_is_written_from_the_sources_the_plugin_chose():
+    cards = {"success": True, "result": [{"_widget_type": "source_cards", "_widget_payload": {"cards": [{"title": "Odpis.pdf"}]}}], "row_count": 1}
+    plugin = SourcesPlugin(AnswerSources(result=cards, prompt="Źródła: Odpis.pdf. Odpowiedz tylko z nich.", message="Wybieram źródła"))
+    llm = ToolsRecordingLLM([
+        {"content": None, "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {"content": "Szkic odpowiedzi modelu.", "tool_calls": None},
+        {"content": "Odpowiedź ze źródeł.", "tool_calls": None},
+    ])
+    service = AgentService(plugin, llm)
+
+    events = await collect_events(service.run("Kiedy?"))
+
+    complete = next(e for e in events if e["type"] == "complete")["data"]
+    assert complete["content"] == "Odpowiedź ze źródeł."
+    assert plugin.calls == [("Kiedy?", 1)]
+    step = [e["data"] for e in events if e["type"] == "tool" and e["data"]["name"] == "select_sources"]
+    assert step and step[0]["result"] == cards
+    assert complete["tool_history"][-1]["tool"] == "select_sources"
+    assert llm.tools_per_call[-1] is None  # the answer is written without tools
+    assert llm.messages_history[-1][-1]["content"].startswith("Źródła: Odpis.pdf")
+
+
+@pytest.mark.asyncio
+async def test_without_sources_from_the_plugin_the_models_answer_stays():
+    plugin = SourcesPlugin(None)
+    llm = MockLLMProvider([
+        {"content": None, "tool_calls": [{"id": "c1", "function": {"name": "test_query", "arguments": "{}"}}]},
+        {"content": "Odpowiedź modelu.", "tool_calls": None},
+    ])
+    service = AgentService(plugin, llm)
+
+    result = await get_final_result(service.run("Kiedy?"))
+
+    assert result["content"] == "Odpowiedź modelu." and llm.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sources_are_not_chosen_without_tool_calls():
+    plugin = SourcesPlugin(AnswerSources(result={}, prompt="x"))
+    service = AgentService(plugin, MockLLMProvider([{"content": "Cześć!", "tool_calls": None}]))
+
+    result = await get_final_result(service.run("Cześć"))
+
+    assert result["content"] == "Cześć!" and plugin.calls == []

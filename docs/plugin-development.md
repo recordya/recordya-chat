@@ -1286,6 +1286,30 @@ sdk.results((context) => {
 });
 ```
 
+### Choosing the Answer's Sources (ManagedPlugin)
+
+A managed plugin can fix the sources of the final answer instead of relying on the model to show them. Override `select_answer_sources(question, tool_history)` and return an `AnswerSources` (from `src.plugin_sdk`):
+
+- `result`: a tool result shown as a `select_sources` step (e.g. widget rows with source cards) and recorded in the tool history;
+- `prompt`: the sources (e.g. titles and fragments) and how to answer from them;
+- `message`: the step's status text.
+
+AgentService calls it once per run, when the model stops calling tools (after at least one tool call). With sources, it discards the model's last message (`token_reset` if it was streamed), shows the step, adds `prompt` as a user message and asks the model for the answer without tools; that answer is final. `None` (default) or an exception keeps the model's own answer.
+
+```python
+from src.plugin_sdk import AnswerSources
+
+async def select_answer_sources(self, question, tool_history):
+    rows = best_rows_of_this_turn()
+    if not rows:
+        return None
+    return AnswerSources(
+        result={"success": True, "result": [{"_widget_type": "source_cards", "_widget_payload": {"cards": rows}}], "row_count": len(rows)},
+        prompt="Answer only from these sources: ...",
+        message="Choosing the sources",
+    )
+```
+
 ### Tool Preview Rendering (Super-Admin Reasoning Panel)
 
 Plugins can supply custom previews for individual tool calls displayed in the `super_admin`-only `ReasoningPanel`. Use `sdk.toolRenderer({ toolName, target, decide })`:

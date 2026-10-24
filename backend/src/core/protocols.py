@@ -171,6 +171,20 @@ class ExecutablePlugin(BasePlugin):
 
 
 @dataclass
+class AnswerSources:
+    """The sources of the final answer, chosen by a ManagedPlugin after the tool calls.
+
+    ``result`` is shown as a ``select_sources`` tool step (e.g. widget rows with source
+    cards); ``prompt`` gives the model the sources and how to answer from them; the answer
+    is then generated from this prompt without tools. ``message`` is the step's status text.
+    """
+
+    result: dict[str, Any]
+    prompt: str
+    message: str = ""
+
+
+@dataclass
 class ContextConfig:
     """Tells ConversationBuilder how to extract and summarise query results.
 
@@ -247,6 +261,17 @@ class ManagedPlugin(BasePlugin):
         conversation history, or normalized before ``execute_tool()`` runs.
         """
         return arguments
+
+    async def select_answer_sources(
+        self, question: str, tool_history: list[dict[str, Any]]
+    ) -> AnswerSources | None:
+        """Choose the sources of the final answer once the model stops calling tools.
+
+        When this returns sources, AgentService shows them as a ``select_sources`` step and
+        asks the model for the answer from these sources only, without tools; the model's
+        own last message is discarded. ``None`` (default) keeps the model's answer.
+        """
+        return None
 
     def get_context_config(self) -> ContextConfig | None:
         """Return context injection config, or ``None`` to disable.

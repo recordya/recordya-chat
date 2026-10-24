@@ -19,6 +19,7 @@ from typing import Any
 
 from src.core.engine import CoreEngine
 from src.core.protocols import (
+    AnswerSources,
     BasePlugin,
     ContextConfig,
     ExecutablePlugin,
@@ -55,6 +56,7 @@ __all__ = [
     "BaseSQLPlugin",
     "CoreEngine",
     # Types
+    "AnswerSources",
     "ContextConfig",
     "LLMRequest",
     "LLMResponse",
