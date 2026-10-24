@@ -1310,6 +1310,15 @@ async def select_answer_sources(self, question, tool_history):
     )
 ```
 
+### Preparing the Answer in Code (ManagedPlugin)
+
+For questions where the plugin knows the steps, the model does not need to drive them. Override `prepare_answer(question, conversation_history)` and return a `PreparedAnswer(steps, sources)` (from `src.plugin_sdk`):
+
+- `steps`: `PreparedStep(tool_name, result, arguments)` for each step the plugin ran (e.g. a plan with its searches); they are shown as tool steps, the first one while the hook runs (named by the plugin's `prepare_tool_name`);
+- `sources`: an `AnswerSources`; with it, the answer is written from the sources without tools and the agent loop is skipped. Without it (e.g. small talk), the agent loop runs as usual.
+
+`None` (default) or an exception runs the agent loop. A local model follows a fixed pipeline far more reliably than flow rules in a prompt: keep the model for the decisions (classification, a plan, relevance, the answer) and run the steps in code.
+
 ### Tool Preview Rendering (Super-Admin Reasoning Panel)
 
 Plugins can supply custom previews for individual tool calls displayed in the `super_admin`-only `ReasoningPanel`. Use `sdk.toolRenderer({ toolName, target, decide })`:

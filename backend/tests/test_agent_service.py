@@ -10,7 +10,7 @@ import pytest
 
 from src.core.config import settings
 from src.core.i18n import translate
-from src.core.protocols import AnswerSources, ManagedPlugin
+from src.core.protocols import AnswerSources, ManagedPlugin, PreparedAnswer, PreparedStep
 from src.services.agent import (
     _FALLBACK_CONTENT,
     MAX_ITERATIONS,
@@ -1889,3 +1889,56 @@ async def test_at_the_iteration_limit_the_answer_is_written_from_the_plugins_sou
     complete = next(e for e in events if e["type"] == "complete")["data"]
     assert complete["content"] == "Odpowiedź ze źródeł." and not complete.get("error")
     assert llm.tools_per_call[-1] is None and len(plugin.calls) == 1
+
+
+
+class PreparingPlugin(MockPlugin):
+    """Prepares the turn in code before the model."""
+
+    prepare_tool_name = "search_plan"
+
+    def __init__(self, prepared: PreparedAnswer | None) -> None:
+        super().__init__()
+        self.prepared = prepared
+
+    async def prepare_answer(self, question, conversation_history):
+        return self.prepared
+
+
+@pytest.mark.asyncio
+async def test_a_prepared_answer_skips_the_agent_loop():
+    sources = AnswerSources(result={"success": True, "result": [], "row_count": 1}, prompt="Źródła: A.pdf")
+    plugin = PreparingPlugin(PreparedAnswer(
+        steps=[PreparedStep(tool_name="search_plan", result={"success": True, "row_count": 3, "plan": {}})],
+        sources=sources,
+    ))
+    llm = ToolsRecordingLLM([{"content": "Odpowiedź z przygotowanych źródeł.", "tool_calls": None}])
+    service = AgentService(plugin, llm)
+
+    events = await collect_events(service.run("Kiedy?"))
+
+    complete = next(e for e in events if e["type"] == "complete")["data"]
+    assert complete["content"] == "Odpowiedź z przygotowanych źródeł."
+    assert llm.call_count == 1 and llm.tools_per_call == [None]  # only the answer, without tools
+    steps = [e["data"]["tool_name"] for e in events if e["type"] == "status" and e["data"].get("tool_name")]
+    assert steps == ["search_plan", "select_sources"]
+    assert [h["tool"] for h in complete["tool_history"]] == ["search_plan", "select_sources"]
+
+
+@pytest.mark.asyncio
+async def test_without_prepared_sources_the_agent_loop_runs():
+    plugin = PreparingPlugin(PreparedAnswer(steps=[PreparedStep(tool_name="search_plan", result={"success": True, "route": "chat"})]))
+    llm = MockLLMProvider([{"content": "Cześć!", "tool_calls": None}])
+    service = AgentService(plugin, llm)
+
+    events = await collect_events(service.run("Cześć"))
+
+    assert next(e for e in events if e["type"] == "complete")["data"]["content"] == "Cześć!"
+    assert any(e["type"] == "tool" and e["data"]["name"] == "search_plan" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_plugins_without_the_hook_show_no_prepared_step(plugin, llm_provider):
+    events = await collect_events(AgentService(plugin, llm_provider).run("Cześć"))
+
+    assert not any(e["type"] == "status" and str(e["data"].get("tool_id", "")).startswith("prepared") for e in events)

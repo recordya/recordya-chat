@@ -26,6 +26,8 @@ from src.core.protocols import (
     LLMRequest,
     LLMResponse,
     ManagedPlugin,
+    PreparedAnswer,
+    PreparedStep,
     ToolCall,
     ToolResult,
     ViewPlugin,
@@ -57,6 +59,8 @@ __all__ = [
     "CoreEngine",
     # Types
     "AnswerSources",
+    "PreparedAnswer",
+    "PreparedStep",
     "ContextConfig",
     "LLMRequest",
     "LLMResponse",
